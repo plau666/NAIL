@@ -5,3 +5,4 @@ output/**/checkpoint-*/
 # Raw tinygsm jsonls — gzipped copies (.jsonl.gz) are committed alongside.
 # Run `gunzip -k data/tinygsm/*.jsonl.gz` on a fresh clone before training.
 data/tinygsm/*.jsonl
+data/tinygsm/tinygsm_7m.jsonl.gz
