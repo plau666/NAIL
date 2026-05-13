@@ -1,6 +1,6 @@
-"""TM-style on-policy distillation (importance-weighted policy gradient) with LoRA.
+"""Reverse (importance-weighted policy-gradient) on-policy distillation with LoRA.
 
-Same algorithm as TM_opd.py but the student is wrapped with PEFT LoRA.
+Same algorithm as reverse.py but the student is wrapped with PEFT LoRA.
 Checkpoints save adapter weights + optimizer + scheduler + RNG + global_step
 so that training can be fully resumed from any checkpoint.
 
@@ -13,15 +13,15 @@ For each batch of prompts x:
   4. Importance-weighted loss: L(θ) = -Σ (p_θ(y_t|s_t) / q(y_t|s_t)) · A_t
 
 Usage:
-    python TM_opd_lora.py \
+    python reverse_lora.py \
         --student_model google/gemma-3-270m-it \
         --expert_model google/gemma-3-1b-it \
         --train_data real_math/data/gsm8k/train.jsonl \
-        --output_dir real_math/output/tm_opd_lora_r16 \
-        --name tm_opd_lora_r16 --lora_rank 16
+        --output_dir real_math/output/reverse_lora_r16 \
+        --name reverse_lora_r16 --lora_rank 16
 
     # Resume from latest:
-    python TM_opd_lora.py ... --resume_from_checkpoint auto
+    python reverse_lora.py ... --resume_from_checkpoint auto
 """
 
 import argparse

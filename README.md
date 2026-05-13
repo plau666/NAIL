@@ -15,11 +15,11 @@ NAIL/
 ├── trainer_real/
 │   ├── gsm_utils.py                # shared dataset, collator, eval, answer extraction
 │   ├── offline_bc_lora.py          # OBC training (uses HF Trainer)
-│   ├── simple_opd_lora.py          # Simple-OPD training (custom loop)
-│   ├── TM_opd_lora.py              # TM-OPD training (custom loop)
+│   ├── forward_lora.py          # Simple-OPD training (custom loop)
+│   ├── reverse_lora.py              # TM-OPD training (custom loop)
 │   ├── run_offline_bc_lora.sh      # launcher for OBC
-│   ├── run_simple_opd_lora.sh      # launcher for Simple OPD
-│   └── run_TM_opd_lora.sh          # launcher for TM-OPD
+│   ├── run_forward_lora.sh      # launcher for Simple OPD
+│   └── run_reverse_lora.sh          # launcher for TM-OPD
 ├── eval/
 │   ├── eval_gsm8k.py           # eval any HF model on GSM8K with vLLM
 │   └── eval_lora_ckpts_gsm8k.py # sweep LoRA ckpts in a run dir with vLLM
@@ -37,10 +37,37 @@ NAIL/
 
 ## Setup
 
+We pin every package (including torch / vllm with the right CUDA local-version
+tags) in `requirements.txt`. The recommended way to install is with
+[`uv`](https://docs.astral.sh/uv/) — it's much faster than `pip` and resolves
+the torch + vllm CUDA wheels cleanly:
+
 ```bash
-cd /home/peihanliu/NAIL
+# 1. Install uv once (skip if you already have it).
+curl -LsSf https://astral.sh/uv/install.sh | sh
+#  (or:  pip install --user uv  if you'd rather not pipe curl)
+
+# 2. Create a Python 3.11 venv inside the repo and install the frozen deps.
+cd <your_repo_path>
+uv venv .venv --python 3.11
+source .venv/bin/activate
+
+uv pip install \
+    --index-strategy unsafe-best-match \
+    --extra-index-url https://download.pytorch.org/whl/cu128 \
+    -r requirements.txt
+```
+
+`torch==2.11.0+cu128` lives on the PyTorch index, hence the `--extra-index-url`.
+`vllm==0.20.2+cu124` is pulled from PyPI; uv will build it from source if no
+prebuilt wheel matches your platform — that's ~15–40 min on a 96-core box, but
+only once. Subsequent venvs reuse the build cache.
+
+Plain `pip + venv` still works (slower):
+
+```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install --extra-index-url https://download.pytorch.org/whl/cu128 -r requirements.txt
 ```
 
 GPU: tested on A100 40GB. bf16 throughout. A single GPU is sufficient.
@@ -88,17 +115,61 @@ bash trainer_real/run_offline_bc_lora.sh
 # Override: STUDENT=google/gemma-3-1b-it GPU=3 LR=5e-4 bash trainer_real/run_offline_bc_lora.sh
 ```
 
-### Simple OPD (on-policy, hard labels from expert argmax)
+### Forward KL distillation (on-policy, hard labels from expert argmax)
+
+The base launcher is `trainer_real/run_forward_lora.sh`. Four named
+wrappers cover the canonical (`student_temp`) × (`clean/noisy expert`)
+combinations:
+
+| Wrapper | Method | `STUDENT_TEMP` |
+|---|---|---|
+| `run_NailF.sh` | NAIL-F | 0 (greedy student rollouts) |
+| `run_OpdF.sh`  | OPD-F  | 1 (sampled student rollouts) |
+
+Each wrapper just `exec`s `run_forward_lora.sh` with `STUDENT_TEMP` locked
+and `EXPERT_TEMP` / `GRAD_ACCUM` / `GPU` / `SEED` / `TRAIN_DATA` / … left
+overridable. Toggle clean vs noisy expert via `EXPERT_TEMP`:
+
 ```bash
-bash trainer_real/run_simple_opd_lora.sh
-# Override: STUDENT_TEMP=1.0 EXPERT_TEMP=1.0 GPU=3 bash trainer_real/run_simple_opd_lora.sh
-# Student temp 0 = greedy rollouts; expert temp controls target sharpness.
+# NAIL-F  (greedy student rollouts)
+EXPERT_TEMP=1.0 TRAIN_DATA=data/tinygsm/tinygsm_400k.jsonl bash trainer_real/run_NailF.sh   # clean expert
+EXPERT_TEMP=4.0 TRAIN_DATA=data/tinygsm/tinygsm_400k.jsonl bash trainer_real/run_NailF.sh   # noisy expert
+
+# OPD-F   (temp-1 student rollouts)
+EXPERT_TEMP=1.0 TRAIN_DATA=data/tinygsm/tinygsm_400k.jsonl bash trainer_real/run_OpdF.sh    # clean expert
+EXPERT_TEMP=4.0 TRAIN_DATA=data/tinygsm/tinygsm_400k.jsonl bash trainer_real/run_OpdF.sh    # noisy expert
 ```
 
-### TM-OPD (on-policy, importance-weighted policy gradient)
+If you'd rather hand-tune everything, call the base script directly:
+
 ```bash
-bash trainer_real/run_TM_opd_lora.sh
-# Override: STUDENT_TEMP=1.0 EXPERT_TEMP=1.0 GPU=3 bash trainer_real/run_TM_opd_lora.sh
+STUDENT_TEMP=1.0 EXPERT_TEMP=1.0 GPU=3 bash trainer_real/run_forward_lora.sh
+```
+
+### Reverse KL distillation (on-policy, importance-weighted policy gradient)
+
+Same shape as forward; the reverse-KL variant uses
+`trainer_real/run_reverse_lora.sh`:
+
+| Wrapper | Method | `STUDENT_TEMP` |
+|---|---|---|
+| `run_NailR.sh` | NAIL-R | 0 (greedy student rollouts) |
+| `run_OpdR.sh`  | OPD-R  | 1 (sampled student rollouts) |
+
+```bash
+# NAIL-R  (greedy student rollouts)
+EXPERT_TEMP=1.0 TRAIN_DATA=data/tinygsm/tinygsm_400k.jsonl bash trainer_real/run_NailR.sh   # clean expert
+EXPERT_TEMP=4.0 TRAIN_DATA=data/tinygsm/tinygsm_400k.jsonl bash trainer_real/run_NailR.sh   # noisy expert
+
+# OPD-R   (temp-1 student rollouts)
+EXPERT_TEMP=1.0 TRAIN_DATA=data/tinygsm/tinygsm_400k.jsonl bash trainer_real/run_OpdR.sh    # clean expert
+EXPERT_TEMP=4.0 TRAIN_DATA=data/tinygsm/tinygsm_400k.jsonl bash trainer_real/run_OpdR.sh    # noisy expert
+```
+
+Or call the base script directly:
+
+```bash
+STUDENT_TEMP=1.0 EXPERT_TEMP=1.0 GPU=3 bash trainer_real/run_reverse_lora.sh
 ```
 
 All three write LoRA checkpoints to `output/<run_name>/checkpoint-NNN/` and the
@@ -129,15 +200,15 @@ CUDA_VISIBLE_DEVICES=0 python eval/eval_gsm8k.py \
 ## Notes
 
 - **Seeds**: all three scripts honor `--seed`. LoRA init, DataLoader shuffle, and rollout sampling are seeded. CUDA kernel nondeterminism is not disabled — two runs with the same seed match to ~0.5 ppt.
-- **Gradient clipping**: disabled in all three methods. SOPD/TMOPD at high LR (≥ 5e-4) can diverge — if you scale batch up, consider re-enabling clipping.
+- **Gradient clipping**: disabled in all three methods. forward/reverse at high LR (≥ 5e-4) can diverge
 - **LR schedule**: all three use linear warmup (10%) → cosine decay to 1% of peak LR.
-- **bf16**: model weights & activations in bf16. OBC upcasts logits to fp32 for CE via Accelerate's autocast; SOPD/TMOPD keep loss in bf16.
+- **bf16**: model weights & activations in bf16. OBC upcasts logits to fp32 for CE via Accelerate's autocast; forward/reverse keep loss in bf16.
 - **Memory** on a 40 GiB A100:
   - OBC: bsz=8 ga=8 max_length=768 → ~37 GiB (tight)
-  - SOPD / TMOPD at bsz=2 ga=32 rollout=64 → ~25 GiB
-  - SOPD / TMOPD at bsz=2 ga=256 rollout=512 → ~25 GiB (best per-prompt throughput)
-  - SOPD / TMOPD at bsz=2 ga=512 rollout=1024 → ~38 GiB (risky)
-- **Per-step time** (sopd on gemma-3-270m + 1B, mnt=512):
+  - forward / reverse at bsz=2 ga=32 rollout=64 → ~25 GiB
+  - forward / reverse at bsz=2 ga=256 rollout=512 → ~25 GiB (best per-prompt throughput)
+  - forward / reverse at bsz=2 ga=512 rollout=1024 → ~38 GiB (risky)
+- **Per-step time** (forward on gemma-3-270m + 1B, mnt=512):
   - rollout=64: ~41 s/step (0.64 s/prompt)
   - rollout=512: ~95 s/step (0.19 s/prompt)
   - rollout=1024: ~164 s/step (0.16 s/prompt)

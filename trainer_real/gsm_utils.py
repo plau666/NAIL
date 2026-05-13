@@ -213,7 +213,7 @@ def compute_eval_loss(model, tokenizer, eval_data_path, max_length=1024,
     """LM cross-entropy loss on (prompt, completion) pairs, masked to completion tokens.
 
     Returns (mean_loss_per_completion_token, n_examples).
-    Used by SOPD / TM-OPD custom training loops to get a periodic eval_loss.
+    Used by forward / reverse custom training loops to get a periodic eval_loss.
     """
     ds = RolloutSFTDataset(eval_data_path, tokenizer, max_length=max_length,
                             prompt_field=prompt_field, completion_field=completion_field,

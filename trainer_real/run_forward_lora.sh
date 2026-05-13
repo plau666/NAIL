@@ -1,12 +1,12 @@
 #!/bin/bash
-# TM-OPD with LoRA: importance-weighted on-policy distillation.
+# Simple OPD with LoRA: on-policy distillation — student rollouts with expert's argmax tokens as targets.
 # Logs GSM8K test eval_loss every save_steps.
 #
 # Usage (from NAIL repo root):
-#   bash trainer_real/run_TM_opd_lora.sh
+#   bash trainer_real/run_forward_lora.sh
 #
-# Override via env vars:
-#   GPU=3 STUDENT_TEMP=1.0 EXPERT_TEMP=1.0 bash trainer_real/run_TM_opd_lora.sh
+# Override via env vars, e.g.:
+#   GPU=3 STUDENT_TEMP=1.0 EXPERT_TEMP=1.0 bash trainer_real/run_forward_lora.sh
 
 set -e
 
@@ -16,6 +16,7 @@ STUDENT=${STUDENT:-google/gemma-3-270m-it}
 STUDENT_SHORT=${STUDENT_SHORT:-gemma270m_it}
 EXPERT=${EXPERT:-google/gemma-3-1b-it}
 EXPERT_SHORT=${EXPERT_SHORT:-gemma3_1b_it}
+# Prompts-only file (expects `question` field by default; override with PROMPT_FIELD).
 TRAIN_DATA=${TRAIN_DATA:-data/tinygsm/tinygsm_400k.jsonl}
 PROMPT_FIELD=${PROMPT_FIELD:-question}
 GPU=${GPU:-0}
@@ -28,7 +29,6 @@ MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-512}
 STUDENT_TEMP=${STUDENT_TEMP:-1.0}
 EXPERT_TEMP=${EXPERT_TEMP:-1.0}
 SAVE_STEPS=${SAVE_STEPS:-200}
-SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-50}
 SEED=${SEED:-42}
 WANDB_PROJECT=${WANDB_PROJECT:-NAIL}
 
@@ -52,7 +52,7 @@ else
     E_MODE="et$(echo $EXPERT_TEMP | tr '.' 'p')"
 fi
 
-RUN_NAME=${RUN_NAME:-tm_opd_lora_r${LORA_RANK}_${STUDENT_SHORT}_${EXPERT_SHORT}_${S_MODE}_${E_MODE}_seed${SEED}}
+RUN_NAME=${RUN_NAME:-forward_lora_r${LORA_RANK}_${STUDENT_SHORT}_${EXPERT_SHORT}_${S_MODE}_${E_MODE}_seed${SEED}}
 OUTPUT_DIR=${OUTPUT_DIR:-output/${RUN_NAME}}
 LOG_DIR=${LOG_DIR:-logs}
 
@@ -66,7 +66,7 @@ fi
 LORA_ALPHA_FLAG=""
 [ -n "$LORA_ALPHA" ] && LORA_ALPHA_FLAG="--lora_alpha $LORA_ALPHA"
 
-echo "=== TM-OPD + LoRA (rank=${LORA_RANK}) ==="
+echo "=== Simple OPD + LoRA (rank=${LORA_RANK}) ==="
 echo "  Student:   ${STUDENT} (${S_MODE})"
 echo "  Expert:    ${EXPERT} (${E_MODE})"
 echo "  Train:     ${TRAIN_DATA} (field=${PROMPT_FIELD})"
@@ -75,7 +75,7 @@ echo "  Eff BSZ:   $((BSZ * GRAD_ACCUM)) (bsz=${BSZ} × ga=${GRAD_ACCUM})"
 echo "  LR:        ${LR}, Epochs: ${EPOCHS}, MaxNewTok: ${MAX_NEW_TOKENS}"
 echo "  Output:    ${OUTPUT_DIR}"
 
-PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=$GPU nohup python "$SCRIPT_DIR/TM_opd_lora.py" \
+PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=$GPU nohup python "$SCRIPT_DIR/forward_lora.py" \
     --student_model "$STUDENT" \
     --expert_model "$EXPERT" \
     --train_data "$TRAIN_DATA" \
@@ -92,7 +92,7 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=$GPU nohup python "$SCRIPT_DIR/TM_opd_lo
     --weight_decay 0.01 \
     --logging_steps 50 \
     --save_steps "$SAVE_STEPS" \
-    --save_total_limit "$SAVE_TOTAL_LIMIT" \
+    --save_total_limit 50 \
     --bf16 \
     --max_new_tokens "$MAX_NEW_TOKENS" \
     --student_temperature "$STUDENT_TEMP" \

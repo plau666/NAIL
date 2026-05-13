@@ -1,21 +1,21 @@
-"""Simple on-policy distillation (hard-label SFT from expert) with LoRA.
+"""Forward on-policy distillation (hard-label SFT from expert) with LoRA.
 
-Same algorithm as simple_opd.py but the student is wrapped with PEFT LoRA.
+Same algorithm as forward.py but the student is wrapped with PEFT LoRA.
 Checkpoints save adapter weights + optimizer + scheduler + RNG + global_step
 so that training can be fully resumed from any checkpoint.
 
 Usage:
-    python simple_opd_lora.py \
+    python forward_lora.py \
         --student_model google/gemma-3-270m-it \
         --expert_model google/gemma-3-1b-it \
         --train_data real_math/data/gsm8k/train.jsonl \
-        --output_dir real_math/output/sopd_lora_r16_st1p0_egreedy \
-        --name sopd_lora_r16_st1p0_egreedy \
+        --output_dir real_math/output/forward_lora_r16_st1p0_egreedy \
+        --name forward_lora_r16_st1p0_egreedy \
         --lora_rank 16 \
         --student_temperature 1.0 --expert_temperature 0.0
 
     # Resume from latest:
-    python simple_opd_lora.py ... --resume_from_checkpoint auto
+    python forward_lora.py ... --resume_from_checkpoint auto
 """
 
 import argparse
