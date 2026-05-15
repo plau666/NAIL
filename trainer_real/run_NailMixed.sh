@@ -1,12 +1,26 @@
 #!/bin/bash
-# TM-OPD with LoRA: importance-weighted on-policy distillation.
-# Logs GSM8K test eval_loss every save_steps.
+# NAIL-Mixed: convex blend of NAIL-F (forward MC KL) and NAIL-R (importance-
+# weighted reverse KL with a fresh auxiliary student token) on the SAME greedy
+# student prefix. Matches small-cot's `loss = mixed`, `method_family = nail`:
+#
+#     L(theta) = (1 - BETA) * L_forward + BETA * L_reverse
+#
+# Defaults:
+#   STUDENT_TEMP = 0.0  (greedy NAIL prefix, shared by both arms)
+#   AUX_SAMPLE   = 1    (paper-faithful reverse arm; drawing a' ~ pi_theta
+#                        keeps the reverse-KL estimator unbiased even though
+#                        rollouts are greedy)
+#   BETA         = 0.5  (equal forward/reverse mix; override at the CLI)
+#   EXPERT_TEMP  = 32.0 (noisy expert; same default as run_NailR.sh /
+#                        run_NailF.sh — set EXPERT_TEMP=1.0 for clean expert)
 #
 # Usage (from NAIL repo root):
-#   bash trainer_real/run_reverse_lora.sh
+#   bash trainer_real/run_NailMixed.sh                              # beta=0.5
+#   BETA=0.3 bash trainer_real/run_NailMixed.sh                     # 70% F / 30% R
+#   BETA=0.7 EXPERT_TEMP=1.0 bash trainer_real/run_NailMixed.sh     # clean expert, R-heavy
 #
-# Override via env vars:
-#   GPU=3 STUDENT_TEMP=1.0 EXPERT_TEMP=1.0 bash trainer_real/run_reverse_lora.sh
+# All other knobs (GPU, SEED, BSZ, LR, …) follow the same env-var convention
+# as run_reverse_lora.sh / run_forward_lora.sh.
 
 set -e
 
@@ -22,11 +36,13 @@ GPU=${GPU:-0}
 
 EPOCHS=${EPOCHS:-1}
 BSZ=${BSZ:-2}
-GRAD_ACCUM=${GRAD_ACCUM:-32}
+GRAD_ACCUM=${GRAD_ACCUM:-2}
 LR=${LR:-1e-4}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-512}
-STUDENT_TEMP=${STUDENT_TEMP:-1.0}
-EXPERT_TEMP=${EXPERT_TEMP:-1.0}
+STUDENT_TEMP=${STUDENT_TEMP:-0.0}
+EXPERT_TEMP=${EXPERT_TEMP:-32.0}
+BETA=${BETA:-0.5}
+AUX_SAMPLE=${AUX_SAMPLE:-1}
 SAVE_STEPS=${SAVE_STEPS:-200}
 SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-50}
 SEED=${SEED:-42}
@@ -35,12 +51,6 @@ WANDB_PROJECT=${WANDB_PROJECT:-NAIL}
 LORA_RANK=${LORA_RANK:-128}
 LORA_ALPHA=${LORA_ALPHA:-}
 LORA_DROPOUT=${LORA_DROPOUT:-0.0}
-
-# AUX_SAMPLE=1 draws a fresh student token at each rollout prefix as the
-# reverse-KL MC sample (paper-faithful NAIL-R, unbiased even with greedy
-# rollouts). Default off reuses the rollout token, which is unbiased only when
-# STUDENT_TEMP=1.0 (OPD-R).
-AUX_SAMPLE=${AUX_SAMPLE:-0}
 
 GSM8K_EVAL_LOSS_DATA=${GSM8K_EVAL_LOSS_DATA:-data/gsm8k/test.jsonl}
 GSM8K_EVAL_LOSS_BSZ=${GSM8K_EVAL_LOSS_BSZ:-8}
@@ -57,8 +67,9 @@ if [ "$EXPERT_TEMP" = "0" ] || [ "$EXPERT_TEMP" = "0.0" ]; then
 else
     E_MODE="et$(echo $EXPERT_TEMP | tr '.' 'p')"
 fi
+BETA_TAG="beta$(echo $BETA | tr '.' 'p')"
 
-RUN_NAME=${RUN_NAME:-reverse_lora_r${LORA_RANK}_${STUDENT_SHORT}_${EXPERT_SHORT}_${S_MODE}_${E_MODE}_seed${SEED}}
+RUN_NAME=${RUN_NAME:-mixed_lora_r${LORA_RANK}_${STUDENT_SHORT}_${EXPERT_SHORT}_${S_MODE}_${E_MODE}_${BETA_TAG}_seed${SEED}}
 OUTPUT_DIR=${OUTPUT_DIR:-output/${RUN_NAME}}
 LOG_DIR=${LOG_DIR:-logs}
 
@@ -77,16 +88,18 @@ case "$(echo "$AUX_SAMPLE" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|on) AUX_SAMPLE_FLAG="--aux_sample" ;;
 esac
 
-echo "=== TM-OPD + LoRA (rank=${LORA_RANK}) ==="
+echo "=== NAIL-Mixed + LoRA (rank=${LORA_RANK}) ==="
 echo "  Student:   ${STUDENT} (${S_MODE})"
 echo "  Expert:    ${EXPERT} (${E_MODE})"
+echo "  Beta:      ${BETA}  ((1-beta)*forward + beta*reverse)"
+echo "  AuxSample: ${AUX_SAMPLE}  ${AUX_SAMPLE_FLAG:+(reverse arm uses fresh student sample)}"
 echo "  Train:     ${TRAIN_DATA} (field=${PROMPT_FIELD})"
 echo "  GPU:       ${GPU}"
 echo "  Eff BSZ:   $((BSZ * GRAD_ACCUM)) (bsz=${BSZ} × ga=${GRAD_ACCUM})"
 echo "  LR:        ${LR}, Epochs: ${EPOCHS}, MaxNewTok: ${MAX_NEW_TOKENS}"
 echo "  Output:    ${OUTPUT_DIR}"
 
-PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=$GPU nohup python "$SCRIPT_DIR/reverse_lora.py" \
+PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=$GPU nohup python "$SCRIPT_DIR/mixed_lora.py" \
     --student_model "$STUDENT" \
     --expert_model "$EXPERT" \
     --train_data "$TRAIN_DATA" \
@@ -108,10 +121,11 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=$GPU nohup python "$SCRIPT_DIR/reverse_l
     --max_new_tokens "$MAX_NEW_TOKENS" \
     --student_temperature "$STUDENT_TEMP" \
     --expert_temperature "$EXPERT_TEMP" \
+    --beta "$BETA" \
+    $AUX_SAMPLE_FLAG \
     --lora_rank "$LORA_RANK" \
     $LORA_ALPHA_FLAG \
     --lora_dropout "$LORA_DROPOUT" \
-    $AUX_SAMPLE_FLAG \
     --gsm8k_eval_loss_data "$GSM8K_EVAL_LOSS_DATA" \
     --gsm8k_eval_loss_batch_size "$GSM8K_EVAL_LOSS_BSZ" \
     --skip_initial_eval \

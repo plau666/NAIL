@@ -1,6 +1,7 @@
 #!/bin/bash
 # NAIL-R (reverse) = run_reverse_lora.sh with student rollouts pinned to greedy
-# (STUDENT_TEMP=0). All other knobs (GPU, EXPERT_TEMP, SEED, BSZ, …) are passed
+# (STUDENT_TEMP=0) and the aux-sample reverse-KL estimator
+# (AUX_SAMPLE=1). All other knobs (GPU, EXPERT_TEMP, SEED, BSZ, …) are passed
 # through; override them as you would for the base script.
 #
 # Usage (from NAIL repo root):
@@ -18,4 +19,5 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXPERT_TEMP=${EXPERT_TEMP:-32.0} \
 GRAD_ACCUM=${GRAD_ACCUM:-2} \
 STUDENT_TEMP=0.0 \
+AUX_SAMPLE=${AUX_SAMPLE:-1} \
     exec bash "$SCRIPT_DIR/run_reverse_lora.sh" "$@"
