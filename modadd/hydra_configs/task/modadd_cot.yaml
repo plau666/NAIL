@@ -1,0 +1,11 @@
+# @package _global_
+task:
+  dataset: modadd_cot
+  modadd_p: 7
+  modadd_m: 31
+  data_root: data
+  teacher_output_root: ${modadd_teacher_root:${task.modadd_p},${task.modadd_m},${task.teacher_seed}}
+  bank_seed: 1337
+  teacher_seed: 1337
+  render_seed: 1337
+  teacher_depth: 1

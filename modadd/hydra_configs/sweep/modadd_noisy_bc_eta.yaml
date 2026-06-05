@@ -1,0 +1,8 @@
+# @package _global_
+sweep:
+  name: modadd_noisy_bc_eta
+
+hydra:
+  sweeper:
+    params:
+      task.eta: 0.05,0.1,0.2

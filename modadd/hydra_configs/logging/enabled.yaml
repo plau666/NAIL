@@ -1,0 +1,7 @@
+# @package _global_
+logging:
+  wandb_log: true
+  wandb_project: NAIL
+  wandb_run_name: null
+  wandb_run_id: null
+  wandb_init_timeout: 300

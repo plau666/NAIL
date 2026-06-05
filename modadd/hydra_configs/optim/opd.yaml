@@ -1,0 +1,25 @@
+# @package _global_
+optim:
+  init_from: scratch
+  init_from_ckpt: ""
+  continue_from_subset_size: 0
+  batch_size: 64
+  max_iters: ${epoch_steps:${task.subset_size},${optim.batch_size}}
+  learning_rate: 0.00001
+  decay_lr: true
+  warmup_iters: 2000
+  lr_decay_iters: ${optim.max_iters}
+  min_lr: ${optim.learning_rate}
+  weight_decay: 0.0
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  eval_interval: 5000
+  eval_n: 5000
+  eval_batch_size: 512
+  log_interval: 50
+  save_interval: 0
+  single_epoch: true
+  shuffle_prompts: false
+  seed: 1337
+  eps: 1.0e-10

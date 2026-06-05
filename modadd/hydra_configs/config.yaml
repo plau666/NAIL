@@ -1,0 +1,18 @@
+defaults:
+  - _self_
+  - experiment: modadd_nail
+  - sweep: none
+
+run:
+  output_root: output
+  name: default-run
+  out_dir: ${path_join:${run.output_root},${run.name}}
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: hydra_outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: hydra_multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    subdir: ${hydra.job.num}_${run.name}

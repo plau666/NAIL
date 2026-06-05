@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - modadd_cot
+  - _self_
+
+task:
+  modadd_p: 7
+  modadd_m: 21

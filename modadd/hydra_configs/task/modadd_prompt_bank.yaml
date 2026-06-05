@@ -1,0 +1,13 @@
+# @package _global_
+task:
+  data_root: data
+  teacher_output_root: ${modadd_teacher_root:${task.modadd_p},${task.modadd_m},${task.teacher_seed}}
+  bank_seed: 1337
+  teacher_seed: 1337
+  render_seed: 1337
+  teacher_depth: 1
+  modadd_p: 7
+  modadd_m: 31
+  n_train: 15000000
+  n_val: 5000
+  prompt_bank_dir: ${path_join:${task.data_root},${modadd_prompt_bank_name:${task.modadd_p},${task.modadd_m},${task.n_train},${task.n_val},${task.bank_seed}}}

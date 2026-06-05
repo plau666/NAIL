@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+  - /pipeline: pretrain
+  - /task: modadd_noisy_offline
+  - /model: modadd_depth1
+  - /optim: synthetic_offline_bc
+  - /runtime: gpu_float16
+  - /logging: enabled
+  - /cluster: local
+  - _self_
+
+run:
+  output_root: ${path_join:${modadd_suite_root:${task.modadd_p},${task.modadd_m},${task.teacher_seed},${task.render_seed},${optim.seed}},offline_bc}
+  name: ${modadd_noisy_bc_run_name:${task.modadd_p},${task.modadd_m},${task.subset_size},${task.eta},${task.rollout_mode},${optim.seed},${task.teacher_law}}
+  out_dir: ${path_join:${run.output_root},${out_name:${run.name}}}
+
+optim:
+  modadd_eval_metrics: true
+  modadd_eval_clean_train_loss: true

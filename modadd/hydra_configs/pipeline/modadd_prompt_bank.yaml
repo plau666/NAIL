@@ -1,0 +1,3 @@
+# @package _global_
+pipeline:
+  name: modadd_prompt_bank

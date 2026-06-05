@@ -1,12 +1,45 @@
-# Training checkpoints (LoRA adapter weights + optimizer state)
-output/**/final/
-output/**/checkpoint-*/
+# Python bytecode / venv / caches
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.cache/
 
+# Editor / OS junk
+.vscode/
+.idea/
+.DS_Store
+
+# WandB local cache
+wandb/
+
+# Training outputs (per-trainer `output/` + legacy top-level `output/`)
 output/*
+gsm/output/*
+modadd/output/*
 results/*
-*.pdf
+hydra_outputs/
+hydra_multirun/
 
-# Raw tinygsm jsonls — gzipped copies (.jsonl.gz) are committed alongside.
-# Run `gunzip -k data/tinygsm/*.jsonl.gz` on a fresh clone before training.
-data/tinygsm/*.jsonl
-data/tinygsm/tinygsm_7m.jsonl.gz
+# Plots
+plot.ipynb
+
+# Logs
+logs/
+gsm/logs/
+
+# Generated GSM8K data — gzipped copies are committed; raw .jsonl are derived.
+# After clone: gunzip -k gsm/data/tinygsm/*.jsonl.gz
+gsm/data/tinygsm/*.jsonl
+gsm/data/tinygsm/tinygsm_1m.jsonl.gz
+gsm/data/tinygsm/tinygsm_7m.jsonl.gz
+
+# Modadd-generated prompt banks / noisy datasets (built by `experiment=modadd_prompt_bank`
+# and `experiment=modadd_noisy_render`)
+modadd/data/modadd_clean_prompt_bank_*/
+modadd/data/modadd_noisy_offline_*/
+modadd/data/teacher_runs_*/
+modadd/out-modadd-*/
+
+# Paper figures (rebuilt from analysis scripts)
+*.pdf

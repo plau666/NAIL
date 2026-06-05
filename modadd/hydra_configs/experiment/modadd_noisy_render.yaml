@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /pipeline: modadd_render
+  - /task: modadd_noisy_render
+  - /runtime: gpu_float16
+  - /logging: disabled
+  - /cluster: local
+  - _self_
+
+run:
+  name: ${task.dataset}
+  out_dir: ${path_join:${task.data_root},${task.dataset}}

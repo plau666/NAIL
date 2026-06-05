@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /pipeline: modadd_prompt_bank
+  - /task: modadd_prompt_bank
+  - /runtime: cpu
+  - /logging: disabled
+  - /cluster: local
+  - _self_
+
+run:
+  name: ${modadd_prompt_bank_name:${task.modadd_p},${task.modadd_m},${task.n_train},${task.n_val},${task.bank_seed}}
+  out_dir: ${task.prompt_bank_dir}

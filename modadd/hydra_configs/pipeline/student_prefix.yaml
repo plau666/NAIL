@@ -1,0 +1,5 @@
+# @package _global_
+# Preferred neutral name for the shared student-prefix implementation backend.
+# `pipeline=nail` remains a legacy alias for older configs.
+pipeline:
+  name: student_prefix

@@ -1,0 +1,35 @@
+# @package _global_
+task:
+  task: modadd
+  data_root: data
+  teacher_output_root: ${modadd_teacher_root:${task.modadd_p},${task.modadd_m},${task.teacher_seed}}
+  bank_seed: 1337
+  teacher_seed: 1337
+  render_seed: 1337
+  teacher_depth: 1
+  modadd_p: 7
+  modadd_m: 31
+  n_train: 15000000
+  n_val: 5000
+  teacher_checkpoint: ${path_join:${task.teacher_output_root},${out_name:${modadd_expert_run_name:${task.modadd_p},${task.modadd_m},${task.teacher_depth},${task.teacher_seed},cot}}}
+  prompt_bank_dir: ${path_join:${task.data_root},${modadd_prompt_bank_name:${task.modadd_p},${task.modadd_m},${task.n_train},${task.n_val},${task.bank_seed}}}
+  subset_size: 1000000
+  eta: 0.05
+  teacher_law: distributional_noise
+  random_suffix_noise:
+    enabled: true
+    key_positions: semantic_key
+    trigger_eta: null
+    random_suffix_mode: valid_tokens
+    keep_format_tokens: true
+    seed: ${optim.seed}
+    apply_to: both
+    coord_strategy: cyclic
+    fixed_coord: 0
+    eligible_values: [1, 2, 3, 4, 5]
+    one_key_per_block: true
+  teacher_signal: mc
+  loss: reverse
+  kl_beta: null
+  rollout_temperature_override: null
+  loss_temperature_override: null

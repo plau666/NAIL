@@ -1,0 +1,36 @@
+# @package _global_
+cluster:
+  name: aics
+  account: null
+  partition: null
+  qos: null
+  gpus_per_node: 1
+  cpus_per_task: 8
+  mem_gb: 32
+  timeout_min: 720
+
+hydra:
+  job:
+    env_copy:
+      - PATH
+      - HOME
+      - USER
+  launcher:
+    submitit_folder: ${hydra.sweep.dir}/.submitit/%j
+    timeout_min: 720
+    cpus_per_task: 8
+    gpus_per_node: 1
+    tasks_per_node: 1
+    mem_gb: 32
+    nodes: 1
+    name: ${hydra.job.name}
+    partition: null
+    qos: null
+    account: null
+    signal_delay_s: 120
+    max_num_timeout: 0
+    array_parallelism: 256
+    additional_parameters: {}
+    setup:
+      - export PYTHONPATH=${hydra:runtime.cwd}/src:${hydra:runtime.cwd}
+      - export WANDB_DIR=${hydra:runtime.cwd}/wandb
