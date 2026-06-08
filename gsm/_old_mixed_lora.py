@@ -1,47 +1,25 @@
-"""Mixed forward + reverse KL on-policy distillation (NAIL-Mixed) with LoRA.
+"""Mixed-KL on-policy distillation with LoRA.
 
-Combines the forward-KL surrogate (hard-label CE on the expert's MC token at
-each student prefix) and the reverse-KL surrogate (IS-weighted advantage at
-each visited prefix) on a SINGLE student rollout. Both arms share the
-expert/student forward passes per chunk — only the per-token loss differs.
+Blend of the forward-KL (MC, hard-label CE on the expert's sampled token) and
+reverse-KL (importance-weighted policy gradient) objectives on the **same**
+greedy student prefix:
 
-Loss:
-    L(θ) = (w_fwd · L_forward(θ) + w_rev · L_reverse(θ))
-where
-    L_forward(θ) = -mean_real_token[ log π_θ(ỹ_t | s_t) ]   with ỹ_t ~ π_E,noisy
-    L_reverse(θ) = -mean_real_token[ IW_t · (log π_E,noisy(a_t|s_t) - log π_θ(a_t|s_t).detach()) ]
+    L(theta) = (1 - beta) * L_forward + beta * L_reverse
 
-Both means use the SAME global denominator: total_n_real = sum over the whole
-opt-step batch of non-pad answer positions. Pad positions (HF-inserted post-EOS
-fillers) are excluded from numerator and denominator in both arms — matching
-NeMo-RL's `masked_mean(..., global_normalization_factor=global_valid_toks)` and
-Tinker's `sum(loss * mask) / sum(mask)`.
-
-CLI variants (controlled by --beta ∈ [0, 1]):
-    Pure NAIL-F      (forward-only, greedy rollouts):
-        --beta 0 --student_temperature 0
-    Pure OPD-F       (forward-only, temp-1 rollouts):
-        --beta 0 --student_temperature 1
-    Pure NAIL-R      (reverse-only, greedy rollouts + aux):
-        --beta 1 --student_temperature 0 --aux_sample
-    Pure OPD-R       (reverse-only, temp-1 rollouts):
-        --beta 1 --student_temperature 1
-    NAIL-Mixed (default): equal mix, both arms active:
-        --beta 0.5
-
-Constraints:
-    - If reverse_weight > 0, expert_temperature must be > 0 (the reverse arm
-      uses log π_E at the chosen action; T=0 would give -inf at non-argmax).
-    - student_temperature is independent of expert_temperature and can be 0
-      (greedy) or 1 (temp-1 sampling).
+For NAIL (greedy rollouts) the reverse arm should draw a fresh auxiliary
+student token at each prefix (`--aux_sample`) to keep the estimator unbiased;
+the rollout-token shortcut is biased when student_temperature == 0. The
+forward arm is the same MC forward-KL surrogate as `forward_lora.py`: sample
+y_t ~ pi_E(.|s_t) and take student NLL on y_t.
 
 Usage:
     python mixed_lora.py \
         --student_model google/gemma-3-270m-it \
         --expert_model google/gemma-3-1b-it \
-        --train_data data/gsm8k/train.jsonl \
-        --output_dir output/mixed_lora_r128 \
-        --name mixed_lora_r128 --lora_rank 128
+        --train_data data/tinygsm/tinygsm_400k.jsonl \
+        --output_dir output/mixed_lora_r128_beta0p5 \
+        --name mixed_lora_r128_beta0p5 \
+        --beta 0.5 --aux_sample --student_temperature 0.0
 
     # Resume from latest:
     python mixed_lora.py ... --resume_from_checkpoint auto
@@ -74,7 +52,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gsm_utils import (
     evaluate_on_gsm8k,
     compute_eval_loss,
-    compute_rollout_diagnostics,
     SYSTEM_PROMPT,
 )
 
@@ -121,7 +98,7 @@ def collate_prompts(batch, tokenizer, system_prompt):
 
 
 def get_logprobs_for_actions(logits, actions):
-    """log π(a|s): log_softmax then gather."""
+    """log pi(a|s): log_softmax then gather."""
     log_probs = F.log_softmax(logits, dim=-1)
     return log_probs.gather(2, actions.unsqueeze(-1)).squeeze(-1)
 
@@ -182,7 +159,7 @@ def load_training_state(ckpt_path, optimizer, scheduler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Mixed forward + reverse KL on-policy distillation (NAIL-Mixed) with LoRA")
+    parser = argparse.ArgumentParser(description="Mixed-KL (forward + reverse) with LoRA")
 
     parser.add_argument("--student_model", type=str, required=True)
     parser.add_argument("--expert_model", type=str, required=True)
@@ -214,23 +191,22 @@ def main():
     parser.add_argument("--gradient_checkpointing", action="store_true", default=False)
 
     parser.add_argument("--max_new_tokens", type=int, default=1024)
-    parser.add_argument("--student_temperature", type=float, default=1.0,
-                        help="Student rollout temperature. 0 = greedy")
+    parser.add_argument("--student_temperature", type=float, default=0.0,
+                        help="Student rollout temperature. 0 = greedy (NAIL default)")
     parser.add_argument("--expert_temperature", type=float, default=1.0,
-                        help="Temperature applied to expert logits. For forward arm "
-                             "it controls the MC sample distribution (0 = argmax). "
-                             "For reverse arm it scales log π_E (must be > 0).")
-
-    # Mixed weight: beta is the reverse-arm weight; forward gets (1 - beta).
-    # This matches the original CLI (`--beta 0` → NAIL-F, `--beta 1` → NAIL-R).
+                        help="Forward arm: temperature for sampling the expert's token; "
+                             "0 = argmax. Reverse arm: scaling applied to expert logits "
+                             "when computing log pi_E(a|s) (default 1.0 keeps the expert "
+                             "unchanged; >1 is the noisy expert used by NAIL).")
     parser.add_argument("--beta", type=float, default=0.5,
-                        help="Mixing weight. loss = (1 - beta) * forward + beta * reverse. "
-                             "beta=0 → pure forward (NAIL-F/OPD-F); beta=1 → pure reverse "
-                             "(NAIL-R/OPD-R). Default 0.5 (equal mix).")
+                        help="Mixing weight. loss = (1-beta)*forward + beta*reverse. "
+                             "beta=0 is pure forward (NAIL-F), beta=1 is pure reverse "
+                             "(NAIL-R).")
     parser.add_argument("--aux_sample", action="store_true", default=False,
-                        help="Reverse arm: draw a fresh aux student token at each "
-                             "prefix instead of reusing the rollout token. "
-                             "Recommended when student_temperature=0 (NAIL-R-style).")
+                        help="Reverse arm only: draw a fresh auxiliary student token at "
+                             "each prefix as the reverse-KL MC sample. Recommended for "
+                             "NAIL (greedy rollouts) — the rollout-token shortcut is "
+                             "biased when student_temperature == 0.")
 
     parser.add_argument("--eval_steps", type=int, default=999999)
     parser.add_argument("--max_eval_examples", type=int, default=0)
@@ -241,7 +217,9 @@ def main():
     parser.add_argument("--gsm8k_eval_loss_data", type=str, default=None,
                         help="Raw GSM8K jsonl (question/answer fields) for periodic eval loss. "
                              "Computed every save_steps.")
-    parser.add_argument("--gsm8k_eval_loss_batch_size", type=int, default=4)
+    parser.add_argument("--gsm8k_eval_loss_batch_size", type=int, default=4,
+                        help="Per-device batch size for GSM8K eval loss. Keep low (4) — "
+                             "gemma-3 262k vocab fp32 logits are memory-heavy.")
 
     # LoRA
     parser.add_argument("--lora_rank", type=int, default=16)
@@ -258,15 +236,12 @@ def main():
 
     args = parser.parse_args()
 
-    # === Sanity checks on the mixed-arm configuration ===
     if not (0.0 <= args.beta <= 1.0):
         raise ValueError(f"--beta must be in [0, 1], got {args.beta}")
     forward_weight = 1.0 - args.beta
     reverse_weight = args.beta
-    if reverse_weight > 0:
-        assert args.expert_temperature > 0, \
-            "Reverse arm requires expert_temperature > 0 (log π_E at non-argmax tokens " \
-            "would be -inf at T=0). Use beta=0 (pure forward) or set --expert_temperature 1.0."
+    run_forward_arm = forward_weight > 0.0
+    run_reverse_arm = reverse_weight > 0.0
 
     set_seed(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
@@ -374,17 +349,6 @@ def main():
     start_epoch = 0
     if resume_path and os.path.isdir(resume_path):
         start_step, start_epoch = load_training_state(resume_path, optimizer, scheduler)
-        if start_step >= total_steps:
-            print(f"Resumed step {start_step} >= total_steps {total_steps}; "
-                  f"nothing to do.")
-        else:
-            n_per_epoch = len(dataloader)
-            batches_left_in_epoch = n_per_epoch - (start_step % n_per_epoch)
-            wasted = n_per_epoch - batches_left_in_epoch
-            print(f"Resumed at step {start_step}/{total_steps} (epoch {start_epoch}). "
-                  f"NOTE: dataloader restarts from epoch start, so ~{wasted} batches "
-                  f"will be re-processed before reaching new work. Training will still "
-                  f"stop exactly at global_step={total_steps} (step-based hard cap).")
 
     # --- Generation config ---
     if args.student_temperature == 0:
@@ -422,22 +386,14 @@ def main():
 
     # --- Training loop ---
     s_mode = "greedy" if args.student_temperature == 0 else f"temp={args.student_temperature}"
-    print(f"Starting NAIL-Mixed (LoRA, beta={args.beta}, w_fwd={forward_weight}, "
-          f"w_rev={reverse_weight}{', aux_sample' if args.aux_sample else ''}) "
-          f"for {total_steps} steps (student={s_mode})"
+    print(f"Starting Mixed-KL (LoRA) for {total_steps} steps "
+          f"(student={s_mode}, beta={args.beta}, aux_sample={args.aux_sample})"
           f"{' — resuming from step ' + str(start_step) if start_step else ''}")
     student.train()
     running_loss = 0.0
-    running_fwd = 0.0
-    running_rev = 0.0
+    running_forward = 0.0
+    running_reverse = 0.0
     running_advantage = 0.0
-    # Running rollout-diagnostic accumulators (averaged over logging_steps)
-    running_pct_eos = 0.0
-    running_pct_boxed = 0.0
-    running_n_real = 0.0
-    running_alpha = 0.0
-    running_mean_seq_len = 0.0
-    running_gen_len = 0.0
     global_step = start_step
 
     def enforce_save_limit():
@@ -450,9 +406,7 @@ def main():
 
     for epoch in range(start_epoch, args.num_train_epochs):
         for batch in dataloader:
-            # Step-based hard cap — checked at top of iter so we don't even
-            # rollout on the (would-be) post-cap step.
-            if global_step >= total_steps:
+            if args.max_steps > 0 and global_step >= args.max_steps:
                 break
 
             prompt_ids_full = batch["input_ids"].to(device)
@@ -460,7 +414,7 @@ def main():
             P = prompt_ids_full.shape[1]
             total_B = prompt_ids_full.shape[0]
 
-            # === Student rollout with LoRA adapter active ===
+            # === Student rollout (greedy by default for NAIL) ===
             student.eval()
             if args.gradient_checkpointing:
                 student.gradient_checkpointing_disable()
@@ -485,24 +439,11 @@ def main():
                 torch.ones(total_B, gen_len, device=device, dtype=torch.long),
             ], dim=1)
 
-            # === Global pad mask + denominator for the whole opt step ===
-            # The pad mask is determined by the ROLLOUT tokens — any position
-            # past a row's EOS is `pad_token_id`. Both arms exclude these.
-            rollout_actions_full = student_out_full[:, P:]
-            pad_mask_full = (rollout_actions_full != tokenizer.pad_token_id)
-            total_n_real = pad_mask_full.sum().clamp(min=1).to(torch.float32)
-
-            # === Rollout diagnostics (logged every logging_steps) ===
-            diag = compute_rollout_diagnostics(
-                rollout_actions_full, pad_mask_full,
-                tokenizer, tokenizer.eos_token_id,
-            )
-
             # === Chunked expert/student forward + backward ===
             optimizer.zero_grad()
             chunk_loss_sum = 0.0
-            chunk_fwd_sum_log = 0.0   # for separate forward-arm wandb logging
-            chunk_rev_sum_log = 0.0   # for separate reverse-arm wandb logging
+            chunk_forward_sum = 0.0
+            chunk_reverse_sum = 0.0
             chunk_adv_sum = 0.0
             for chunk_idx in range(n_chunks):
                 start = chunk_idx * args.batch_size
@@ -510,59 +451,58 @@ def main():
                 full_seq = student_out_full[start:end]
                 full_mask = full_mask_full[start:end]
                 rollout_actions = full_seq[:, P:]
-                chunk_pad_mask_b = pad_mask_full[start:end]   # bool, [chunk_B, gen_len]
 
-                # === Expert forward (shared by both arms) ===
-                # We get raw expert logits at every answer position; the forward
-                # arm uses them to sample an MC token (with optional temperature
-                # scaling), and the reverse arm uses them to evaluate log π_E
-                # at the chosen action (always with temperature scaling).
+                # Expert forward — shared by both arms (raw logits + temp-scaled copy).
                 with torch.no_grad():
                     e_logits = expert(input_ids=full_seq, attention_mask=full_mask).logits
                     e_answer_logits = e_logits[:, P - 1 : P + gen_len - 1, :]
-                    if args.expert_temperature != 1.0:
-                        e_answer_logits_scaled = e_answer_logits / args.expert_temperature
-                    else:
-                        e_answer_logits_scaled = e_answer_logits
+                    B, T, V = e_answer_logits.shape
 
-                # === Student forward with grad (shared by both arms) ===
+                # Student loss-time forward (with grad). Shared by both arms.
                 p_logits = student(input_ids=full_seq, attention_mask=full_mask).logits
                 p_answer_logits = p_logits[:, P - 1 : P + gen_len - 1, :]
 
-                mask = chunk_pad_mask_b.to(p_answer_logits.dtype)
+                # Detached zero scaffolding so the autograd graph stays intact
+                # at beta=0 or beta=1 when one arm contributes no gradient.
+                zero_loss = p_answer_logits.sum() * 0.0
+                forward_loss = zero_loss
+                reverse_loss = zero_loss
+                advantage_mean_val = 0.0
 
-                # === Forward-KL arm: NLL on expert MC token ===
-                if forward_weight > 0:
-                    if args.expert_temperature == 0:
-                        # argmax doesn't depend on scaling
-                        expert_tokens = e_answer_logits.argmax(dim=-1)
+                # === Forward arm: MC forward KL (NAIL-F) ===
+                # Sample expert token at expert_temperature (0 = argmax) and take
+                # student CE on it. Equivalent to forward_lora.py.
+                if run_forward_arm:
+                    with torch.no_grad():
+                        if args.expert_temperature == 0:
+                            expert_tokens = e_answer_logits.argmax(dim=-1)
+                        else:
+                            scaled = e_answer_logits / args.expert_temperature
+                            probs = F.softmax(scaled.float(), dim=-1)
+                            expert_tokens = torch.multinomial(
+                                probs.view(B * T, V), num_samples=1,
+                            ).view(B, T)
+                    log_p_expert = get_logprobs_for_actions(p_answer_logits, expert_tokens)
+                    # No pad mask: NAIL rollouts are greedy and don't contain
+                    # pad tokens; OPD-style padded rollouts would mask here.
+                    forward_loss = -log_p_expert.mean()
+
+                # === Reverse arm: importance-weighted TM (NAIL-R / OPD-R) ===
+                if run_reverse_arm:
+                    if args.expert_temperature != 1.0:
+                        e_answer_logits_rev = e_answer_logits / args.expert_temperature
                     else:
-                        probs = F.softmax(e_answer_logits_scaled, dim=-1)
-                        Bc, Tc, Vc = probs.shape
-                        expert_tokens = torch.multinomial(
-                            probs.reshape(Bc * Tc, Vc), num_samples=1
-                        ).view(Bc, Tc)
-                    log_p_at_expert = get_logprobs_for_actions(p_answer_logits, expert_tokens)
-                    fwd_chunk_signed_sum = -(log_p_at_expert * mask).sum()   # positive (NLL)
-                else:
-                    fwd_chunk_signed_sum = torch.zeros(
-                        (), device=device, dtype=p_answer_logits.dtype)
+                        e_answer_logits_rev = e_answer_logits
 
-                # === Reverse-KL arm: IS-weighted advantage at chosen action ===
-                if reverse_weight > 0:
                     if args.aux_sample:
-                        # Draw aux student token from p_θ at each prefix.
                         with torch.no_grad():
-                            aux_probs = F.softmax(
-                                p_answer_logits.detach().float(), dim=-1)
-                            Bc, Tc, Vc = aux_probs.shape
+                            aux_probs = F.softmax(p_answer_logits.detach().float(), dim=-1)
                             actions = torch.multinomial(
-                                aux_probs.reshape(Bc * Tc, Vc), num_samples=1
-                            ).view(Bc, Tc)
+                                aux_probs.reshape(B * T, V), num_samples=1,
+                            ).view(B, T)
                         log_q = get_logprobs_for_actions(p_answer_logits.detach(), actions)
+                        answer_mask = torch.ones_like(actions, dtype=p_answer_logits.dtype)
                     else:
-                        # Reuse the rollout token. Run a second (no-grad)
-                        # student forward to recover log_q at the rollout token.
                         with torch.no_grad():
                             q_logits = student(
                                 input_ids=full_seq, attention_mask=full_mask,
@@ -570,49 +510,30 @@ def main():
                             q_answer_logits = q_logits[:, P - 1 : P + gen_len - 1, :]
                             log_q = get_logprobs_for_actions(q_answer_logits, rollout_actions)
                         actions = rollout_actions
+                        answer_mask = (actions != tokenizer.pad_token_id).float()
 
-                    log_expert = get_logprobs_for_actions(e_answer_logits_scaled, actions)
+                    log_expert = get_logprobs_for_actions(e_answer_logits_rev, actions)
                     advantage = log_expert - log_q
+                    log_p = get_logprobs_for_actions(p_answer_logits, actions)
+                    importance_weight = torch.exp(log_p - log_q.detach())
+                    num_tokens = answer_mask.sum().clamp(min=1)
+                    reverse_loss = -(importance_weight * advantage.detach() * answer_mask).sum() / num_tokens
+                    advantage_mean_val = (advantage * answer_mask).sum().item() / num_tokens.item()
 
-                    log_p_at_action = get_logprobs_for_actions(p_answer_logits, actions)
-                    importance_weight = torch.exp(log_p_at_action - log_q.detach())
-
-                    rev_per_token = importance_weight * advantage.detach() * mask
-                    # rev loss = -mean (IW * A); we accumulate the signed sum.
-                    rev_chunk_signed_sum = -rev_per_token.sum()
-                    chunk_adv_sum += (advantage * mask).sum().item()
-                else:
-                    rev_chunk_signed_sum = torch.zeros(
-                        (), device=device, dtype=p_answer_logits.dtype)
-
-                # === Combine and backprop (global denominator) ===
-                chunk_loss_signed_sum = (
-                    forward_weight * fwd_chunk_signed_sum
-                    + reverse_weight * rev_chunk_signed_sum
-                )
-                loss = chunk_loss_signed_sum / total_n_real
+                # === Mix and backprop ===
+                loss = forward_weight * forward_loss + reverse_weight * reverse_loss
+                loss = loss / n_chunks
                 loss.backward()
 
-                # Logging: surface each arm's contribution per real token.
-                chunk_loss_sum += chunk_loss_signed_sum.item()
-                chunk_fwd_sum_log += fwd_chunk_signed_sum.item()
-                chunk_rev_sum_log += rev_chunk_signed_sum.item()
+                chunk_loss_sum += loss.item() * n_chunks
+                chunk_forward_sum += forward_loss.item()
+                chunk_reverse_sum += reverse_loss.item()
+                chunk_adv_sum += advantage_mean_val
 
-            # Normalize logging quantities by global denominator so they're
-            # comparable across opt steps regardless of pad fraction.
-            total_n_real_f = total_n_real.item()
-            running_loss += chunk_loss_sum / total_n_real_f
-            running_fwd  += chunk_fwd_sum_log / total_n_real_f
-            running_rev  += chunk_rev_sum_log / total_n_real_f
-            running_advantage += chunk_adv_sum / total_n_real_f
-
-            # Accumulate rollout diagnostics
-            running_pct_eos      += diag["pct_eos"]
-            running_pct_boxed    += diag["pct_boxed"]
-            running_n_real       += diag["n_real"]
-            running_alpha        += diag["alpha"]
-            running_mean_seq_len += diag["mean_seq_len"]
-            running_gen_len      += diag["gen_len"]
+            running_loss += chunk_loss_sum / n_chunks
+            running_forward += chunk_forward_sum / n_chunks
+            running_reverse += chunk_reverse_sum / n_chunks
+            running_advantage += chunk_adv_sum / n_chunks
 
             optimizer.step()
             scheduler.step()
@@ -620,47 +541,26 @@ def main():
 
             if global_step % args.logging_steps == 0:
                 avg_loss = running_loss / args.logging_steps
-                avg_fwd  = running_fwd  / args.logging_steps
-                avg_rev  = running_rev  / args.logging_steps
-                avg_adv  = running_advantage / args.logging_steps
-                avg_pct_eos      = running_pct_eos      / args.logging_steps
-                avg_pct_boxed    = running_pct_boxed    / args.logging_steps
-                avg_n_real       = running_n_real       / args.logging_steps
-                avg_alpha        = running_alpha        / args.logging_steps
-                avg_mean_seq_len = running_mean_seq_len / args.logging_steps
-                avg_gen_len      = running_gen_len      / args.logging_steps
+                avg_fwd = running_forward / args.logging_steps
+                avg_rev = running_reverse / args.logging_steps
+                avg_adv = running_advantage / args.logging_steps
                 lr = scheduler.get_last_lr()[0]
                 wandb.log({
-                    "train/loss":          avg_loss,
-                    "train/loss_forward":  avg_fwd,
-                    "train/loss_reverse":  avg_rev,
-                    "train/advantage":     avg_adv,
+                    "train/loss": avg_loss,
+                    "train/forward_loss": avg_fwd,
+                    "train/reverse_loss": avg_rev,
+                    "train/advantage": avg_adv,
+                    "train/beta": args.beta,
                     "train/learning_rate": lr,
-                    "train/global_step":   global_step,
-                    "rollout/pct_eos":     avg_pct_eos,
-                    "rollout/pct_boxed":   avg_pct_boxed,
-                    "rollout/n_real":      avg_n_real,
-                    "rollout/alpha":       avg_alpha,
-                    "rollout/mean_seq_len":avg_mean_seq_len,
-                    "rollout/gen_len":     avg_gen_len,
+                    "train/global_step": global_step,
                 }, step=global_step)
-                print(f"Step {global_step}/{total_steps} | "
-                      f"loss: {avg_loss:.4f} (fwd: {avg_fwd:.4f}, rev: {avg_rev:.4f}) | "
-                      f"adv: {avg_adv:.4f} | EOS%: {100*avg_pct_eos:.1f} | "
-                      f"boxed%: {100*avg_pct_boxed:.1f} | α: {avg_alpha:.3f} | "
-                      f"n_real: {avg_n_real:.0f} | "
-                      f"len(mean/gen): {avg_mean_seq_len:.0f}/{avg_gen_len:.0f} | "
-                      f"lr: {lr:.2e}")
+                print(f"Step {global_step}/{total_steps} | loss: {avg_loss:.4f} | "
+                      f"fwd: {avg_fwd:.4f} | rev: {avg_rev:.4f} | "
+                      f"adv: {avg_adv:.4f} | lr: {lr:.2e}")
                 running_loss = 0.0
-                running_fwd = 0.0
-                running_rev = 0.0
+                running_forward = 0.0
+                running_reverse = 0.0
                 running_advantage = 0.0
-                running_pct_eos = 0.0
-                running_pct_boxed = 0.0
-                running_n_real = 0.0
-                running_alpha = 0.0
-                running_mean_seq_len = 0.0
-                running_gen_len = 0.0
 
             if args.eval_source and global_step % args.eval_steps == 0:
                 print(f"\n[Step {global_step}] Running GSM8K eval...")
@@ -682,7 +582,6 @@ def main():
                 print(f"  Saved to {save_path}")
                 enforce_save_limit()
 
-                # GSM8K eval loss every save_steps
                 if args.gsm8k_eval_loss_data and os.path.exists(args.gsm8k_eval_loss_data):
                     torch.cuda.empty_cache()
                     eval_loss, n_eval = compute_eval_loss(
@@ -696,14 +595,10 @@ def main():
                     wandb.log({"eval/loss": eval_loss,
                                "train/global_step": global_step}, step=global_step)
 
-            # Step-based hard cap. Once we reach `total_steps`, training stops
-            # regardless of which epoch we're in. This makes the script robust
-            # to preemption + resume — the dataloader restarts from epoch 0
-            # on resume, but we still terminate exactly at `total_steps`.
-            if global_step >= total_steps:
+            if args.max_steps > 0 and global_step > args.max_steps:
                 break
 
-        if global_step >= total_steps:
+        if args.max_steps > 0 and global_step >= args.max_steps:
             break
 
     # --- Final save ---

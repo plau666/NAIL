@@ -128,7 +128,7 @@ def compute_greedy_accuracy(responses, gt_answers):
             "pred_answer": pred_answer,
             "gt_answer": gt,
             "correct": is_correct,
-            "response": pred_text[:500],
+            "response": pred_text,
         })
     accuracy = correct / len(gt_answers)
     return accuracy, results

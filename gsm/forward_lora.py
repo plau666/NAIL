@@ -1,10 +1,26 @@
-"""Forward on-policy distillation (NAIL-F / OPD-F) with LoRA.
+"""Forward on-policy distillation (NAIL-F / OPD-F) with LoRA — pad-corrected.
 
 Hard-label CE on the expert's sampled token (the MC forward-KL surrogate) on
 the student's own rollout prefixes. STUDENT_TEMP=0 gives the NAIL-F variant
 (greedy prefixes); STUDENT_TEMP=1 gives OPD-F (temp-1 sampled prefixes).
 Checkpoints save adapter weights + optimizer + scheduler + RNG + global_step
 so that training can be fully resumed from any checkpoint.
+
+*** Loss correction vs. the original `gsm/forward_lora.py` ***
+The original used HF's `outputs.loss` with `labels[:, P:] = expert_tokens`,
+which averages cross-entropy over EVERY answer position — including post-EOS
+pad positions that HF's generate() inserts when one row in the rollout batch
+hits EOS before the longest. This (a) dilutes the gradient by α =
+n_real/(B·gen_len), and (b) makes the effective learning rate stochastic
+because α varies per opt step.
+
+This file instead computes a manual NLL on the student's logits, masks out
+pad positions, and divides by the GLOBAL count of real answer tokens across
+the whole opt step (sum of mask over all chunks) — matching NeMo-RL's
+`masked_mean(per_token_kl, mask, global_normalization_factor=global_valid_toks)`
+and Tinker's `sum(reverse_kl * mask) / sum(mask)`. Every real token gets a
+weight of 1/total_n_real in the accumulated gradient, with no per-chunk
+re-weighting and no contribution from post-EOS pad positions.
 
 Usage:
     python forward_lora.py \
@@ -47,6 +63,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gsm_utils import (
     evaluate_on_gsm8k,
     compute_eval_loss,
+    compute_rollout_diagnostics,
     SYSTEM_PROMPT,
 )
 
@@ -326,6 +343,17 @@ def main():
     start_epoch = 0
     if resume_path and os.path.isdir(resume_path):
         start_step, start_epoch = load_training_state(resume_path, optimizer, scheduler)
+        if start_step >= total_steps:
+            print(f"Resumed step {start_step} >= total_steps {total_steps}; "
+                  f"nothing to do.")
+        else:
+            n_per_epoch = len(dataloader)
+            batches_left_in_epoch = n_per_epoch - (start_step % n_per_epoch)
+            wasted = n_per_epoch - batches_left_in_epoch
+            print(f"Resumed at step {start_step}/{total_steps} (epoch {start_epoch}). "
+                  f"NOTE: dataloader restarts from epoch start, so ~{wasted} batches "
+                  f"will be re-processed before reaching new work. Training will still "
+                  f"stop exactly at global_step={total_steps} (step-based hard cap).")
 
     # --- Generation config ---
     if args.student_temperature == 0:
@@ -369,6 +397,13 @@ def main():
           f"{' — resuming from step ' + str(start_step) if start_step else ''}")
     student.train()
     running_loss = 0.0
+    # Running rollout-diagnostic accumulators (averaged over logging_steps)
+    running_pct_eos = 0.0
+    running_pct_boxed = 0.0
+    running_n_real = 0.0
+    running_alpha = 0.0
+    running_mean_seq_len = 0.0
+    running_gen_len = 0.0
     global_step = start_step
     student_vocab_size = base_student.config.vocab_size
 
@@ -416,6 +451,23 @@ def main():
                 torch.ones(total_B, gen_len, device=device, dtype=torch.long),
             ], dim=1)
 
+            # === Global pad mask + denominator for the whole opt step ===
+            # Each rollout token that equals pad_token_id is a post-EOS pad
+            # position inserted by HF generate(). We exclude these from the
+            # loss numerator AND from the denominator. The denominator is
+            # computed ONCE for the whole opt step so every real token across
+            # all chunks gets the same per-token weight in the accumulated
+            # gradient (matches NeMo-RL's `global_valid_toks` pattern).
+            rollout_actions_full = student_out_full[:, P:]
+            pad_mask_full = (rollout_actions_full != tokenizer.pad_token_id)
+            total_n_real = pad_mask_full.sum().clamp(min=1).to(torch.float32)
+
+            # === Rollout diagnostics (logged every logging_steps) ===
+            diag = compute_rollout_diagnostics(
+                rollout_actions_full, pad_mask_full,
+                tokenizer, tokenizer.eos_token_id,
+            )
+
             # === Chunked expert forward + student forward/backward ===
             optimizer.zero_grad()
             chunk_loss_sum = 0.0
@@ -424,7 +476,9 @@ def main():
                 end = start + args.batch_size
                 full_seq = student_out_full[start:end]
                 full_mask = full_mask_full[start:end]
+                chunk_pad_mask = pad_mask_full[start:end]   # [chunk_B, gen_len], bool
 
+                # --- Expert forward to get the MC target token at each prefix ---
                 with torch.no_grad():
                     expert_logits = expert(
                         input_ids=full_seq, attention_mask=full_mask,
@@ -441,14 +495,41 @@ def main():
                         probs.view(B * T, V), num_samples=1
                     ).view(B, T)
 
-                labels = torch.full_like(full_seq, -100)
-                labels[:, P:] = expert_tokens
-                outputs = student(input_ids=full_seq, attention_mask=full_mask, labels=labels)
-                loss = outputs.loss / n_chunks
-                loss.backward()
-                chunk_loss_sum += loss.item() * n_chunks
+                # --- Student forward (with grad), manual NLL on expert tokens ---
+                # We can't use HF's `labels=` here because that averages over
+                # all non(-100) positions, which would re-introduce per-chunk
+                # normalization. Instead compute log_softmax on the answer
+                # logits and gather the per-token student log-prob at the
+                # expert's sampled token.
+                p_logits = student(input_ids=full_seq, attention_mask=full_mask).logits
+                p_answer_logits = p_logits[:, P - 1 : P + gen_len - 1, :]
+                log_probs = F.log_softmax(p_answer_logits, dim=-1)
+                log_p_expert = log_probs.gather(
+                    2, expert_tokens.unsqueeze(-1)
+                ).squeeze(-1)   # [chunk_B, gen_len]
 
-            running_loss += chunk_loss_sum / n_chunks
+                # Mask post-EOS pads out of the sum; divide by GLOBAL denom.
+                mask = chunk_pad_mask.to(log_p_expert.dtype)
+                chunk_nll_sum = -(log_p_expert * mask).sum()
+                loss = chunk_nll_sum / total_n_real
+                loss.backward()
+
+                # Log the masked-sum *as if* it had been per-token-averaged,
+                # so train/loss is comparable to standard NLL magnitudes.
+                chunk_loss_sum += chunk_nll_sum.item()
+
+            # train/loss: total NLL across opt step's real tokens, divided
+            # by total_n_real → mean per-real-token CE, comparable across
+            # steps regardless of how many tokens hit pad.
+            running_loss += chunk_loss_sum / total_n_real.item()
+
+            # Accumulate rollout diagnostics
+            running_pct_eos      += diag["pct_eos"]
+            running_pct_boxed    += diag["pct_boxed"]
+            running_n_real       += diag["n_real"]
+            running_alpha        += diag["alpha"]
+            running_mean_seq_len += diag["mean_seq_len"]
+            running_gen_len      += diag["gen_len"]
 
             optimizer.step()
             scheduler.step()
@@ -456,14 +537,36 @@ def main():
 
             if global_step % args.logging_steps == 0:
                 avg_loss = running_loss / args.logging_steps
+                avg_pct_eos      = running_pct_eos      / args.logging_steps
+                avg_pct_boxed    = running_pct_boxed    / args.logging_steps
+                avg_n_real       = running_n_real       / args.logging_steps
+                avg_alpha        = running_alpha        / args.logging_steps
+                avg_mean_seq_len = running_mean_seq_len / args.logging_steps
+                avg_gen_len      = running_gen_len      / args.logging_steps
                 lr = scheduler.get_last_lr()[0]
                 wandb.log({
-                    "train/loss": avg_loss,
+                    "train/loss":          avg_loss,
                     "train/learning_rate": lr,
-                    "train/global_step": global_step,
+                    "train/global_step":   global_step,
+                    "rollout/pct_eos":     avg_pct_eos,
+                    "rollout/pct_boxed":   avg_pct_boxed,
+                    "rollout/n_real":      avg_n_real,
+                    "rollout/alpha":       avg_alpha,
+                    "rollout/mean_seq_len":avg_mean_seq_len,
+                    "rollout/gen_len":     avg_gen_len,
                 }, step=global_step)
-                print(f"Step {global_step}/{total_steps} | loss: {avg_loss:.4f} | lr: {lr:.2e}")
+                print(f"Step {global_step}/{total_steps} | loss: {avg_loss:.4f} | "
+                      f"EOS%: {100*avg_pct_eos:.1f} | boxed%: {100*avg_pct_boxed:.1f} | "
+                      f"α: {avg_alpha:.3f} | n_real: {avg_n_real:.0f} | "
+                      f"len(mean/gen): {avg_mean_seq_len:.0f}/{avg_gen_len:.0f} | "
+                      f"lr: {lr:.2e}")
                 running_loss = 0.0
+                running_pct_eos = 0.0
+                running_pct_boxed = 0.0
+                running_n_real = 0.0
+                running_alpha = 0.0
+                running_mean_seq_len = 0.0
+                running_gen_len = 0.0
 
             if args.eval_source and global_step % args.eval_steps == 0:
                 print(f"\n[Step {global_step}] Running GSM8K eval...")
@@ -499,10 +602,14 @@ def main():
                     wandb.log({"eval/loss": eval_loss,
                                "train/global_step": global_step}, step=global_step)
 
-            if args.max_steps > 0 and global_step > args.max_steps:
+            # Step-based hard cap. Once we reach `total_steps`, training stops
+            # regardless of which epoch we're in. This makes the script robust
+            # to preemption + resume — the dataloader restarts from epoch 0
+            # on resume, but we still terminate exactly at `total_steps`.
+            if global_step >= total_steps:
                 break
 
-        if args.max_steps > 0 and global_step > args.max_steps:
+        if global_step >= total_steps:
             break
 
     # --- Final save (adapter + state) ---

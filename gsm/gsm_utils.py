@@ -249,6 +249,71 @@ def compute_eval_loss(model, tokenizer, eval_data_path, max_length=1024,
     return mean_loss, len(ds)
 
 
+def compute_rollout_diagnostics(rollout_actions, pad_mask, tokenizer, eos_token_id):
+    """Per-opt-step rollout statistics for training-time logging.
+
+    Args:
+        rollout_actions: [B, gen_len] long tensor — student-generated tokens
+            (the answer portion only; everything past row's EOS is pad_token_id).
+        pad_mask:        [B, gen_len] bool tensor — True at non-pad positions.
+        tokenizer:       HF tokenizer (used to decode rows for \\boxed detection).
+        eos_token_id:    int — the EOS token id.
+
+    Returns a dict of cheap scalars (Python floats / ints):
+        n_real            : total non-pad answer tokens this step
+        n_total           : B * gen_len
+        alpha             : n_real / n_total  (the bug's effective LR scale)
+        n_eos             : # rows containing eos_token_id anywhere
+        pct_eos           : n_eos / B
+        n_boxed           : # rows whose decoded text contains '\\boxed'
+        pct_boxed         : n_boxed / B
+        mean_seq_len      : mean per-row real-token count
+        max_seq_len       : longest per-row real-token count
+        gen_len           : the rollout's max-length axis (== max per-row real
+                            if some row didn't EOS, else just the longest EOSing row)
+    """
+    import torch
+    B, gen_len = rollout_actions.shape
+    n_real = int(pad_mask.sum().item())
+    n_total = B * gen_len
+    alpha = n_real / n_total if n_total > 0 else 1.0
+
+    # EOS rate: a row "hits EOS" iff eos_token_id appears anywhere in it.
+    eos_in_row = (rollout_actions == eos_token_id).any(dim=1)
+    n_eos = int(eos_in_row.sum().item())
+
+    # Per-row real lengths
+    row_real_lens = pad_mask.sum(dim=1)   # [B], int
+    mean_seq_len = float(row_real_lens.float().mean().item())
+    max_seq_len = int(row_real_lens.max().item())
+
+    # \\boxed rate: decode each row's real portion to text and substring-match.
+    # ~B decode calls per opt step; cheap at typical B (16-64).
+    rollout_cpu = rollout_actions.detach().cpu().tolist()
+    real_lens_cpu = row_real_lens.detach().cpu().tolist()
+    n_boxed = 0
+    for i in range(B):
+        L = real_lens_cpu[i]
+        if L == 0:
+            continue
+        text = tokenizer.decode(rollout_cpu[i][:L], skip_special_tokens=True)
+        if "\\boxed" in text:
+            n_boxed += 1
+
+    return {
+        "n_real":       n_real,
+        "n_total":      n_total,
+        "alpha":        alpha,
+        "n_eos":        n_eos,
+        "pct_eos":      n_eos / B if B > 0 else 0.0,
+        "n_boxed":      n_boxed,
+        "pct_boxed":    n_boxed / B if B > 0 else 0.0,
+        "mean_seq_len": mean_seq_len,
+        "max_seq_len":  max_seq_len,
+        "gen_len":      gen_len,
+    }
+
+
 class GSM8KAccuracyCallback(TrainerCallback):
     def __init__(self, tokenizer, eval_data_path, eval_steps=250,
                  max_eval_examples=200, max_new_tokens=512, eval_batch_size=32,

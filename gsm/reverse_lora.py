@@ -1,4 +1,4 @@
-"""Reverse-KL on-policy distillation (NAIL-R / OPD-R) with LoRA.
+"""Reverse-KL on-policy distillation (NAIL-R / OPD-R) with LoRA — pad-corrected.
 
 Importance-weighted score-function surrogate for KL(π_θ ‖ π_E,noisy) at every
 prefix the student rolls out. STUDENT_TEMP=0 + --aux_sample is NAIL-R
@@ -7,13 +7,32 @@ STUDENT_TEMP=1 without --aux_sample is OPD-R (rollout token reused as the
 on-policy reverse-KL MC sample). Checkpoints save adapter weights + optimizer
 + scheduler + RNG + global_step so training can be fully resumed.
 
+*** Loss correction vs. the original `gsm/reverse_lora.py` ***
+The original computed the reverse-KL loss with PER-CHUNK normalization
+(`loss = (...).sum() / mask.sum() / n_chunks`), and used an all-ones mask in
+the --aux_sample branch (so post-EOS pad positions contributed full weight
+to the aux-sample numerator/denominator). This produced:
+  (a) α-style dilution at the chunk level when chunks had unequal pad counts,
+  (b) full pad inclusion in the aux-sample branch.
+
+This file:
+  - computes a single GLOBAL pad mask over the whole rollout batch,
+  - uses that mask in both branches (rollout-reuse and --aux_sample),
+  - divides each chunk's masked sum by the GLOBAL total real-token count
+    (sum of mask over all chunks), with no /n_chunks anywhere.
+This matches NeMo-RL's `masked_mean(..., global_normalization_factor=
+global_valid_toks)` and Tinker's `sum(reverse_kl * mask) / sum(mask)`. Every
+real token in the opt step contributes 1/total_n_real to the accumulated
+gradient; no post-EOS pad token contributes anything.
+
 For each batch of prompts x:
   1. Roll out the student (with LoRA adapter active) to get trajectory y_{1:T}.
-  2. With --aux_sample: draw a' ~ π_θ(·|s_t) at each visited prefix.
-     Without:           reuse y_t as the MC sample.
+  2. With --aux_sample: draw a' ~ π_θ(·|s_t) at each visited (non-pad) prefix.
+     Without:           reuse y_t as the MC sample at each (non-pad) prefix.
   3. log_p, log_q, log_expert are evaluated at the chosen action; advantage =
      log_expert - log_q.detach().
-  4. Importance-weighted loss: L(θ) = -Σ exp(log_p - log_q.detach()) · A_t
+  4. Loss (masked, globally normalized):
+       L(θ) = -Σ exp(log_p - sg(log_q)) · sg(A) · mask   / total_n_real
 
 Usage:
     python reverse_lora.py \
@@ -54,6 +73,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gsm_utils import (
     evaluate_on_gsm8k,
     compute_eval_loss,
+    compute_rollout_diagnostics,
     SYSTEM_PROMPT,
 )
 
@@ -341,6 +361,17 @@ def main():
     start_epoch = 0
     if resume_path and os.path.isdir(resume_path):
         start_step, start_epoch = load_training_state(resume_path, optimizer, scheduler)
+        if start_step >= total_steps:
+            print(f"Resumed step {start_step} >= total_steps {total_steps}; "
+                  f"nothing to do.")
+        else:
+            n_per_epoch = len(dataloader)
+            batches_left_in_epoch = n_per_epoch - (start_step % n_per_epoch)
+            wasted = n_per_epoch - batches_left_in_epoch
+            print(f"Resumed at step {start_step}/{total_steps} (epoch {start_epoch}). "
+                  f"NOTE: dataloader restarts from epoch start, so ~{wasted} batches "
+                  f"will be re-processed before reaching new work. Training will still "
+                  f"stop exactly at global_step={total_steps} (step-based hard cap).")
 
     # --- Generation config ---
     if args.student_temperature == 0:
@@ -383,6 +414,13 @@ def main():
     student.train()
     running_loss = 0.0
     running_advantage = 0.0
+    # Running rollout-diagnostic accumulators (averaged over logging_steps)
+    running_pct_eos = 0.0
+    running_pct_boxed = 0.0
+    running_n_real = 0.0
+    running_alpha = 0.0
+    running_mean_seq_len = 0.0
+    running_gen_len = 0.0
     global_step = start_step
 
     def enforce_save_limit():
@@ -395,7 +433,9 @@ def main():
 
     for epoch in range(start_epoch, args.num_train_epochs):
         for batch in dataloader:
-            if args.max_steps > 0 and global_step >= args.max_steps:
+            # Step-based hard cap (see note below) — checked at top of iter
+            # so we don't even rollout on the (would-be) post-cap step.
+            if global_step >= total_steps:
                 break
 
             prompt_ids_full = batch["input_ids"].to(device)
@@ -428,6 +468,23 @@ def main():
                 torch.ones(total_B, gen_len, device=device, dtype=torch.long),
             ], dim=1)
 
+            # === Global pad mask + denominator for the whole opt step ===
+            # The pad mask is determined by the ROLLOUT tokens — any position
+            # past a row's EOS is `pad_token_id`. We exclude those from both
+            # the loss numerator and the denominator, and we pre-compute a
+            # single global real-token count for the opt step so every real
+            # token across all chunks contributes 1/total_n_real to the
+            # accumulated gradient. This is the NeMo-RL / Tinker convention.
+            rollout_actions_full = student_out_full[:, P:]
+            pad_mask_full = (rollout_actions_full != tokenizer.pad_token_id)
+            total_n_real = pad_mask_full.sum().clamp(min=1).to(torch.float32)
+
+            # === Rollout diagnostics (logged every logging_steps) ===
+            diag = compute_rollout_diagnostics(
+                rollout_actions_full, pad_mask_full,
+                tokenizer, tokenizer.eos_token_id,
+            )
+
             # === Chunked expert/student forward + backward ===
             optimizer.zero_grad()
             chunk_loss_sum = 0.0
@@ -438,6 +495,7 @@ def main():
                 full_seq = student_out_full[start:end]
                 full_mask = full_mask_full[start:end]
                 rollout_actions = full_seq[:, P:]
+                chunk_pad_mask_b = pad_mask_full[start:end]   # bool, [chunk_B, gen_len]
 
                 # Expert log-probs at every visited prefix (temperature-scaled).
                 with torch.no_grad():
@@ -451,10 +509,12 @@ def main():
                 p_answer_logits = p_logits[:, P - 1 : P + gen_len - 1, :]
 
                 if args.aux_sample:
-                    # draw a fresh auxiliary student token
-                    # at each greedy prefix and use it as the reverse-KL MC sample.
-                    # Sampling uses the loss-time p_θ; since q == p_θ exactly here,
-                    # the IS weight is numerically 1 and the estimator is unbiased.
+                    # Draw a fresh auxiliary student token at each prefix and
+                    # use it as the reverse-KL MC sample. Sampling uses the
+                    # loss-time p_θ; since q == p_θ exactly, IS weight = 1.
+                    # The aux sample is drawn at every position (including
+                    # post-EOS pad positions) for code simplicity, but the
+                    # pad-mask zeroes out those contributions in the loss.
                     with torch.no_grad():
                         aux_probs = F.softmax(p_answer_logits.detach().float(), dim=-1)
                         Bc, Tc, Vc = aux_probs.shape
@@ -462,12 +522,10 @@ def main():
                             aux_probs.reshape(Bc * Tc, Vc), num_samples=1
                         ).view(Bc, Tc)
                     log_q = get_logprobs_for_actions(p_answer_logits.detach(), actions)
-                    answer_mask = torch.ones_like(actions, dtype=p_answer_logits.dtype)
                 else:
                     # Default behaviour: reuse the rollout token as the MC sample.
-                    # Run a second (no-grad) student forward to recover log_q at
-                    # exactly the rollout token — preserved for back-compat with
-                    # existing runs.
+                    # Run a second (no-grad) student forward to recover log_q
+                    # at the rollout token.
                     with torch.no_grad():
                         q_logits = student(
                             input_ids=full_seq, attention_mask=full_mask,
@@ -475,7 +533,14 @@ def main():
                         q_answer_logits = q_logits[:, P - 1 : P + gen_len - 1, :]
                         log_q = get_logprobs_for_actions(q_answer_logits, rollout_actions)
                     actions = rollout_actions
-                    answer_mask = (actions != tokenizer.pad_token_id).float()
+
+                # === Single pad mask for both branches (NeMo-RL convention) ===
+                # `chunk_pad_mask` is True at real (pre-EOS) positions of the
+                # ROLLOUT, False at post-EOS pads. This is the same mask
+                # whether we used the rollout action or a fresh aux sample —
+                # in both cases, positions where the rollout had already
+                # padded should not contribute to the loss.
+                answer_mask = chunk_pad_mask_b.to(p_answer_logits.dtype)
 
                 log_expert = get_logprobs_for_actions(e_answer_logits, actions)
                 advantage = log_expert - log_q
@@ -483,16 +548,35 @@ def main():
                 log_p = get_logprobs_for_actions(p_answer_logits, actions)
                 importance_weight = torch.exp(log_p - log_q.detach())
 
-                num_tokens = answer_mask.sum().clamp(min=1)
-                loss = -(importance_weight * advantage.detach() * answer_mask).sum() / num_tokens
-                loss = loss / n_chunks
+                # Masked sum over the chunk, divided by GLOBAL real-token
+                # count. No per-chunk denominator. No /n_chunks. Each real
+                # token contributes 1/total_n_real to the accumulated gradient.
+                chunk_per_token = (
+                    importance_weight * advantage.detach() * answer_mask
+                )
+                chunk_loss_signed_sum = chunk_per_token.sum()
+                loss = -chunk_loss_signed_sum / total_n_real
                 loss.backward()
 
-                chunk_loss_sum += loss.item() * n_chunks
-                chunk_adv_sum += (advantage * answer_mask).sum().item() / num_tokens.item()
+                # For logging, surface the chunk's contribution to the
+                # globally-normalized mean.
+                chunk_loss_sum += -chunk_loss_signed_sum.item()
+                chunk_adv_sum += (advantage * answer_mask).sum().item()
 
-            running_loss += chunk_loss_sum / n_chunks
-            running_advantage += chunk_adv_sum / n_chunks
+            # train/loss: total negative IS-weighted advantage across the opt
+            # step's real tokens, divided by total_n_real → comparable across
+            # steps regardless of how many tokens hit pad.
+            total_n_real_f = total_n_real.item()
+            running_loss += chunk_loss_sum / total_n_real_f
+            running_advantage += chunk_adv_sum / total_n_real_f
+
+            # Accumulate rollout diagnostics
+            running_pct_eos      += diag["pct_eos"]
+            running_pct_boxed    += diag["pct_boxed"]
+            running_n_real       += diag["n_real"]
+            running_alpha        += diag["alpha"]
+            running_mean_seq_len += diag["mean_seq_len"]
+            running_gen_len      += diag["gen_len"]
 
             optimizer.step()
             scheduler.step()
@@ -501,17 +585,39 @@ def main():
             if global_step % args.logging_steps == 0:
                 avg_loss = running_loss / args.logging_steps
                 avg_adv = running_advantage / args.logging_steps
+                avg_pct_eos      = running_pct_eos      / args.logging_steps
+                avg_pct_boxed    = running_pct_boxed    / args.logging_steps
+                avg_n_real       = running_n_real       / args.logging_steps
+                avg_alpha        = running_alpha        / args.logging_steps
+                avg_mean_seq_len = running_mean_seq_len / args.logging_steps
+                avg_gen_len      = running_gen_len      / args.logging_steps
                 lr = scheduler.get_last_lr()[0]
                 wandb.log({
-                    "train/loss": avg_loss,
-                    "train/advantage": avg_adv,
+                    "train/loss":          avg_loss,
+                    "train/advantage":     avg_adv,
                     "train/learning_rate": lr,
-                    "train/global_step": global_step,
+                    "train/global_step":   global_step,
+                    "rollout/pct_eos":     avg_pct_eos,
+                    "rollout/pct_boxed":   avg_pct_boxed,
+                    "rollout/n_real":      avg_n_real,
+                    "rollout/alpha":       avg_alpha,
+                    "rollout/mean_seq_len":avg_mean_seq_len,
+                    "rollout/gen_len":     avg_gen_len,
                 }, step=global_step)
                 print(f"Step {global_step}/{total_steps} | loss: {avg_loss:.4f} | "
-                      f"adv: {avg_adv:.4f} | lr: {lr:.2e}")
+                      f"adv: {avg_adv:.4f} | EOS%: {100*avg_pct_eos:.1f} | "
+                      f"boxed%: {100*avg_pct_boxed:.1f} | α: {avg_alpha:.3f} | "
+                      f"n_real: {avg_n_real:.0f} | "
+                      f"len(mean/gen): {avg_mean_seq_len:.0f}/{avg_gen_len:.0f} | "
+                      f"lr: {lr:.2e}")
                 running_loss = 0.0
                 running_advantage = 0.0
+                running_pct_eos = 0.0
+                running_pct_boxed = 0.0
+                running_n_real = 0.0
+                running_alpha = 0.0
+                running_mean_seq_len = 0.0
+                running_gen_len = 0.0
 
             if args.eval_source and global_step % args.eval_steps == 0:
                 print(f"\n[Step {global_step}] Running GSM8K eval...")
@@ -547,10 +653,14 @@ def main():
                     wandb.log({"eval/loss": eval_loss,
                                "train/global_step": global_step}, step=global_step)
 
-            if args.max_steps > 0 and global_step > args.max_steps:
+            # Step-based hard cap. Once we reach `total_steps`, training stops
+            # regardless of which epoch we're in. This makes the script robust
+            # to preemption + resume — the dataloader restarts from epoch 0
+            # on resume, but we still terminate exactly at `total_steps`.
+            if global_step >= total_steps:
                 break
 
-        if args.max_steps > 0 and global_step >= args.max_steps:
+        if global_step >= total_steps:
             break
 
     # --- Final save ---

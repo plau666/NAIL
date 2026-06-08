@@ -21,6 +21,10 @@ results/*
 hydra_outputs/
 hydra_multirun/
 
+# Inspections
+gsm/eval/inspections/*
+gsm/inspections/*
+
 # Plots
 plot.ipynb
 
