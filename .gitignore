@@ -21,6 +21,13 @@ results/*
 hydra_outputs/
 hydra_multirun/
 
+# Debug eval results (from smoke-test runs)
+gsm/eval/debug_*/
+
+# Old runs
+gsm/_*
+
+
 # Inspections
 gsm/eval/inspections/*
 gsm/inspections/*
