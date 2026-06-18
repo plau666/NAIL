@@ -257,13 +257,16 @@ def compute_rollout_diagnostics(rollout_actions, pad_mask, tokenizer, eos_token_
             (the answer portion only; everything past row's EOS is pad_token_id).
         pad_mask:        [B, gen_len] bool tensor — True at non-pad positions.
         tokenizer:       HF tokenizer (used to decode rows for \\boxed detection).
-        eos_token_id:    int — the EOS token id.
+        eos_token_id:    int OR list/tuple of ints — the terminator token id(s).
+            For chat-tuned models we pass the full stop-token list
+            (e.g. Gemma-3-it: [<eos>=1, <end_of_turn>=106]) so rows terminating
+            via the chat-template marker also count as "hit EOS".
 
     Returns a dict of cheap scalars (Python floats / ints):
         n_real            : total non-pad answer tokens this step
         n_total           : B * gen_len
         alpha             : n_real / n_total  (the bug's effective LR scale)
-        n_eos             : # rows containing eos_token_id anywhere
+        n_eos             : # rows containing any terminator token anywhere
         pct_eos           : n_eos / B
         n_boxed           : # rows whose decoded text contains '\\boxed'
         pct_boxed         : n_boxed / B
@@ -278,8 +281,18 @@ def compute_rollout_diagnostics(rollout_actions, pad_mask, tokenizer, eos_token_
     n_total = B * gen_len
     alpha = n_real / n_total if n_total > 0 else 1.0
 
-    # EOS rate: a row "hits EOS" iff eos_token_id appears anywhere in it.
-    eos_in_row = (rollout_actions == eos_token_id).any(dim=1)
+    # EOS rate: a row "hits EOS" iff any terminator id appears anywhere in it.
+    # Accept either a single int (legacy) or a list/tuple of ints (chat-tuned
+    # models where the chat-template turn marker — e.g. <end_of_turn> for
+    # Gemma — also signals end-of-response).
+    if isinstance(eos_token_id, (list, tuple)):
+        terminator_ids = list(eos_token_id)
+    else:
+        terminator_ids = [int(eos_token_id)]
+    term_tensor = torch.tensor(
+        terminator_ids, device=rollout_actions.device, dtype=rollout_actions.dtype,
+    )
+    eos_in_row = (rollout_actions.unsqueeze(-1) == term_tensor).any(dim=-1).any(dim=1)
     n_eos = int(eos_in_row.sum().item())
 
     # Per-row real lengths

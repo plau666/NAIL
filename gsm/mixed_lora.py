@@ -514,7 +514,7 @@ def main():
             # === Rollout diagnostics (logged every logging_steps) ===
             diag = compute_rollout_diagnostics(
                 rollout_actions_full, pad_mask_full,
-                tokenizer, tokenizer.eos_token_id,
+                tokenizer, stop_token_ids,
             )
 
             # === Chunked expert/student forward + backward ===
