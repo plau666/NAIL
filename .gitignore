@@ -23,6 +23,9 @@ hydra_multirun/
 
 # Debug eval results (from smoke-test runs)
 gsm/eval/debug_*/
+gsm/eval/obc_*/
+gsm/eval/nail*/
+
 
 # Old runs
 gsm/_*
@@ -39,11 +42,13 @@ plot.ipynb
 logs/
 gsm/logs/
 
+
 # Generated GSM8K data — gzipped copies are committed; raw .jsonl are derived.
 # After clone: gunzip -k gsm/data/tinygsm/*.jsonl.gz
 gsm/data/tinygsm/*.jsonl
 gsm/data/tinygsm/tinygsm_1m.jsonl.gz
 gsm/data/tinygsm/tinygsm_7m.jsonl.gz
+gsm/data/tinygsm_400k_rollouts/*
 
 # Modadd-generated prompt banks / noisy datasets (built by `experiment=modadd_prompt_bank`
 # and `experiment=modadd_noisy_render`)

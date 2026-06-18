@@ -25,6 +25,7 @@ EPOCHS=${EPOCHS:-1}
 BSZ=${BSZ:-2}
 GRAD_ACCUM=${GRAD_ACCUM:-32}
 LR=${LR:-1e-4}
+MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-512}
 STUDENT_TEMP=${STUDENT_TEMP:-1.0}
 EXPERT_TEMP=${EXPERT_TEMP:-1.0}
@@ -90,6 +91,7 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=$GPU nohup python "$SCRIPT_DIR/forward_l
     --learning_rate "$LR" \
     --warmup_ratio 0.1 \
     --weight_decay 0.01 \
+    --max_grad_norm "$MAX_GRAD_NORM" \
     --logging_steps 50 \
     --save_steps "$SAVE_STEPS" \
     --save_total_limit 50 \

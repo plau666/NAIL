@@ -38,6 +38,7 @@ EPOCHS=${EPOCHS:-1}
 BSZ=${BSZ:-2}
 GRAD_ACCUM=${GRAD_ACCUM:-2}
 LR=${LR:-1e-4}
+MAX_GRAD_NORM=${MAX_GRAD_NORM:-1.0}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-512}
 STUDENT_TEMP=${STUDENT_TEMP:-0.0}
 EXPERT_TEMP=${EXPERT_TEMP:-4.0}
@@ -114,6 +115,7 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=$GPU nohup python "$SCRIPT_DIR/mixed_lor
     --learning_rate "$LR" \
     --warmup_ratio 0.1 \
     --weight_decay 0.01 \
+    --max_grad_norm "$MAX_GRAD_NORM" \
     --logging_steps 50 \
     --save_steps "$SAVE_STEPS" \
     --save_total_limit "$SAVE_TOTAL_LIMIT" \
@@ -129,6 +131,7 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=$GPU nohup python "$SCRIPT_DIR/mixed_lor
     --gsm8k_eval_loss_data "$GSM8K_EVAL_LOSS_DATA" \
     --gsm8k_eval_loss_batch_size "$GSM8K_EVAL_LOSS_BSZ" \
     --skip_initial_eval \
+    ${RESUME_FROM_CHECKPOINT:+--resume_from_checkpoint "$RESUME_FROM_CHECKPOINT"} \
     > "${LOG_DIR}/${RUN_NAME}.log" 2>&1 &
 
 echo "  PID: $!"

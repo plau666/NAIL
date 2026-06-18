@@ -193,6 +193,10 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--warmup_ratio", type=float, default=0.1)
     parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0,
+                        help="Clip global L2 norm of trainable-param gradients at "
+                             "this value (0 = disabled). Default 1.0 matches "
+                             "small-cot's `grad_clip: 1.0` and NeMo-RL's default.")
     parser.add_argument("--logging_steps", type=int, default=5)
     parser.add_argument("--save_steps", type=int, default=25)
     parser.add_argument("--save_total_limit", type=int, default=50)
@@ -356,18 +360,30 @@ def main():
                   f"stop exactly at global_step={total_steps} (step-based hard cap).")
 
     # --- Generation config ---
+    # Stop rollout at any of: primary EOS or chat-template turn-end markers.
+    # Chat-tuned models (Gemma-3-it, Llama-3-Instruct, Qwen-it, …) end an
+    # assistant turn by emitting a chat-template token like <end_of_turn>
+    # (Gemma) or <|eot_id|> (Llama) rather than the primary <eos>. The model's
+    # default `generation_config.eos_token_id` is typically already a list of
+    # both (e.g. Gemma-3-it: [1, 106]). Use that list so the rollout halts on
+    # whichever terminator the model actually emits — matches the NeMo-RL /
+    # Tinker convention. Without this, rollouts ramble past <end_of_turn> and
+    # post-EOT tokens leak into the loss as if they were a legitimate response.
+    default_eos = getattr(base_student.generation_config, "eos_token_id", None)
+    stop_token_ids = default_eos if default_eos is not None else tokenizer.eos_token_id
+    print(f"Rollout stop tokens: {stop_token_ids}")
     if args.student_temperature == 0:
         gen_config = GenerationConfig(
             do_sample=False, num_beams=1,
             pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+            eos_token_id=stop_token_ids,
             max_new_tokens=args.max_new_tokens,
         )
     else:
         gen_config = GenerationConfig(
             do_sample=True, temperature=args.student_temperature, top_k=0,
             pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+            eos_token_id=stop_token_ids,
             max_new_tokens=args.max_new_tokens,
         )
 
@@ -404,6 +420,9 @@ def main():
     running_alpha = 0.0
     running_mean_seq_len = 0.0
     running_gen_len = 0.0
+    # Gradient-clipping diagnostics (matches small-cot's reporting)
+    running_pre_clip_grad_norm = 0.0
+    running_grad_clipped = 0.0
     global_step = start_step
     student_vocab_size = base_student.config.vocab_size
 
@@ -531,6 +550,21 @@ def main():
             running_mean_seq_len += diag["mean_seq_len"]
             running_gen_len      += diag["gen_len"]
 
+            # Gradient clipping (matches small-cot's grad_clip / NeMo-RL's max_grad_norm).
+            # Always compute the pre-clip norm — even when max_grad_norm=0 (clip
+            # disabled) we want the diagnostic so we can compare clipped vs
+            # unclipped runs. Only the LoRA params have requires_grad=True, so
+            # we clip just those.
+            trainable_params = [p for p in student.parameters() if p.requires_grad]
+            clip_value = args.max_grad_norm if args.max_grad_norm > 0 else float("inf")
+            pre_clip_grad_norm = torch.nn.utils.clip_grad_norm_(
+                trainable_params, max_norm=clip_value,
+            )
+            running_pre_clip_grad_norm += float(pre_clip_grad_norm)
+            running_grad_clipped += float(
+                args.max_grad_norm > 0 and pre_clip_grad_norm > args.max_grad_norm
+            )
+
             optimizer.step()
             scheduler.step()
             global_step += 1
@@ -543,11 +577,15 @@ def main():
                 avg_alpha        = running_alpha        / args.logging_steps
                 avg_mean_seq_len = running_mean_seq_len / args.logging_steps
                 avg_gen_len      = running_gen_len      / args.logging_steps
+                avg_pre_clip_grad_norm = running_pre_clip_grad_norm / args.logging_steps
+                avg_grad_clipped       = running_grad_clipped       / args.logging_steps
                 lr = scheduler.get_last_lr()[0]
                 wandb.log({
                     "train/loss":          avg_loss,
                     "train/learning_rate": lr,
                     "train/global_step":   global_step,
+                    "train/pre_clip_grad_norm": avg_pre_clip_grad_norm,
+                    "train/grad_clipped":      avg_grad_clipped,
                     "rollout/pct_eos":     avg_pct_eos,
                     "rollout/pct_boxed":   avg_pct_boxed,
                     "rollout/n_real":      avg_n_real,
@@ -559,6 +597,7 @@ def main():
                       f"EOS%: {100*avg_pct_eos:.1f} | boxed%: {100*avg_pct_boxed:.1f} | "
                       f"α: {avg_alpha:.3f} | n_real: {avg_n_real:.0f} | "
                       f"len(mean/gen): {avg_mean_seq_len:.0f}/{avg_gen_len:.0f} | "
+                      f"|g|: {avg_pre_clip_grad_norm:.3f} (clip%: {100*avg_grad_clipped:.0f}) | "
                       f"lr: {lr:.2e}")
                 running_loss = 0.0
                 running_pct_eos = 0.0
@@ -567,6 +606,8 @@ def main():
                 running_alpha = 0.0
                 running_mean_seq_len = 0.0
                 running_gen_len = 0.0
+                running_pre_clip_grad_norm = 0.0
+                running_grad_clipped = 0.0
 
             if args.eval_source and global_step % args.eval_steps == 0:
                 print(f"\n[Step {global_step}] Running GSM8K eval...")
