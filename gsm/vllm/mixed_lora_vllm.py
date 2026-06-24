@@ -77,7 +77,8 @@ os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 from vllm_rollout import VLLMRolloutGenerator
 
 import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# gsm_utils.py lives in the parent dir (gsm/), one level up from this file (gsm/vllm/).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from gsm_utils import (
     evaluate_on_gsm8k,
     compute_eval_loss,
