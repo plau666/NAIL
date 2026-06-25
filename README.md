@@ -23,9 +23,8 @@ Hydra, and W&B.
 Expected core versions after `uv sync --locked`:
 
 ```text
-vLLM wheel metadata: 0.20.2+cu124
-vllm.__version__:    0.20.2
-torch:               2.11.0+cu128
+vLLM:                0.10.2
+torch:               2.8.0+cu128
 transformers:        5.8.1
 peft:                0.18.1
 ```
