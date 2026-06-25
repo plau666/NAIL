@@ -1,27 +1,24 @@
-"""Generate rollouts from a model on a dataset using vLLM.
+"""Generate teacher rollouts for the OfflineBC baseline using vLLM.
 
-Given a dataset of prompts (e.g., GSM8K questions), generate completions
-using a specified model and sampling configuration. Outputs are saved as
-JSONL with prompt and completion fields.
-
-This is the analog of generate_noisy_rollouts.py from the addition experiments,
-but here the "noisy expert" is the model itself (e.g., Qwen2.5-Math) rather
-than a clean expert with manual corruption.
+Given a JSONL dataset of prompts, this script samples completions from an
+expert model and writes a `(prompt, completion)` JSONL file consumed by
+`trainers/offline_bc.py`. If the input contains ground-truth answers, it also
+reports rollout accuracy and completion-length statistics.
 
 Usage (from inside gsm/):
-    # Greedy rollout on TinyGSM prompts with the gemma-3-1b-it expert
-    # (this is the dataset LogLossBC trains on)
-    python data/rollout.py --model google/gemma-3-1b-it \
+    # Clean expert rollout
+    python data/teacher_rollout.py --model google/gemma-3-1b-it \
         --data data/tinygsm/tinygsm_400k.jsonl \
         --prompt_field question --gt_answer_field answer \
         --output data/teacher_rollouts/train.jsonl \
-        --temperature 1.0 --top_p 1.0 --n 1 --seed 42 --max_new_tokens 512
+        --temperature 1.0 --top_p 1.0 --n 1 --seed 42 --max_new_tokens 1024
 
-    # Temperature sampling, 8 completions per prompt
-    python data/rollout.py --model google/gemma-3-1b-it \
+    # Noisy expert rollout
+    python data/teacher_rollout.py --model google/gemma-3-1b-it \
         --data data/tinygsm/tinygsm_400k.jsonl \
-        --output data/teacher_rollouts/t07_n8.jsonl \
-        --temperature 0.7 --top_p 0.8 --n 8
+        --prompt_field question --gt_answer_field answer \
+        --output data/teacher_rollouts/train.jsonl \
+        --temperature 4.0 --top_p 1.0 --n 1 --seed 42 --max_new_tokens 1024
 """
 
 import argparse
@@ -125,7 +122,7 @@ def build_prompt_no_chat(question: str, system_prompt: str) -> str:
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate rollouts from a model using vLLM")
+    parser = argparse.ArgumentParser(description="Generate teacher rollouts using vLLM")
 
     # Model
     parser.add_argument("--model", type=str, required=True, help="HuggingFace model ID or local path")
@@ -151,7 +148,7 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling")
 
-    # Scoring (optional: if GT answers available, compute accuracy)
+    # If ground-truth answers are available, report rollout accuracy.
     parser.add_argument("--gt_answer_field", type=str, default="answer",
                         help="JSONL field for ground truth answer (set to '' to disable scoring)")
 

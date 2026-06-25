@@ -38,9 +38,9 @@ modadd/
 ## Install
 
 Install everything from the top-level repo via `uv` per
-[`../README.md`](../README.md#quick-start). `hydra-core`,
-`hydra-submitit-launcher`, and `omegaconf` are pinned in the main
-`requirements.txt`, so nothing additional is needed for `modadd/`.
+[`../README.md`](../README.md#quick-start). The locked environment includes
+`hydra-core`, `hydra-submitit-launcher`, and `omegaconf`, so nothing additional
+is needed for `modadd/`.
 
 ## Running a modular-addition experiment
 

@@ -1,0 +1,23 @@
+method: offline-bc
+
+student_model: google/gemma-3-270m-it
+student_short: gemma270m_it
+train_data: data/teacher_rollouts/train.jsonl
+
+epochs: 1
+bsz: 8
+grad_accum: 8
+lr: 1.0e-4
+max_length: 1536
+save_steps: 200
+save_total_limit: 50
+seed: 42
+
+lora_rank: 128
+lora_dropout: 0.0
+
+gpu: 0
+wandb_project: NAIL
+gsm8k_eval_loss_data: data/gsm8k/test.jsonl
+gsm8k_eval_loss_bsz: 8
+skip_initial_eval: true

@@ -1,22 +1,18 @@
-"""Shared vLLM rollout backend for the on-policy NAIL trainers (forward / reverse
-/ mixed).
+"""Shared vLLM rollout backend for the on-policy NAIL trainers.
 
-Design
-------
-The three trainers differ ONLY in their loss; they all consume the same thing:
-a batch of student rollouts as a `[B, P + gen_len]` token tensor (left-padded
-prompt columns, then generated tokens right-padded with `pad_id`), over which
-the trainer re-runs an HF forward pass (with grad) to compute the loss. So the
-ONLY thing that needs to change to use vLLM is the rollout generation; the loss,
-the expert forward, the pad-mask, clipping and eval are all downstream and
-untouched.
+The forward, reverse, and mixed trainers differ in their losses, but all consume
+the same rollout representation: a `[B, P + gen_len]` token tensor with
+left-padded prompts followed by generated tokens right-padded with `pad_id`.
+The trainers then re-run an HF forward pass with gradients to compute their
+losses. This wrapper isolates vLLM generation from loss computation, expert
+scoring, masking, clipping, and evaluation.
 
 This module wraps:
   * a colocated vLLM engine holding the base student + a hot-swappable LoRA, and
-  * a `sync()` that pushes the CURRENT training LoRA into the engine EVERY step
-    (truly on-policy), by writing the adapter to a tmpfs dir and re-registering
-    it under a fresh `lora_int_id` (vLLM caches adapters by id, so a new id
-    forces a reload of the just-written weights).
+  * a `sync()` method that pushes the current training LoRA into the engine each
+    step by writing the adapter to tmpfs and re-registering it under a fresh
+    `lora_int_id`. vLLM caches adapters by id, so a new id forces a reload of
+    the just-written weights.
 
 `generate()` returns a tensor in the exact `student.generate()` layout so the
 existing trainer code can use it as a drop-in replacement for the
@@ -65,8 +61,10 @@ class VLLMRolloutGenerator:
 
     @torch.no_grad()
     def sync(self, peft_model):
-        """Push the CURRENT LoRA weights into the engine. Call once per step,
-        BEFORE generate(), so the rollout policy == the gradient policy (IW≈1).
+        """Push the current LoRA weights into the engine.
+
+        Call once per step before `generate()` so rollouts use the same policy
+        whose gradients are being computed.
 
         Writes the adapter to tmpfs and bumps the lora id to force a reload.
         Returns the wall-clock seconds spent (the per-step sync tax).
@@ -116,7 +114,7 @@ class VLLMRolloutGenerator:
             prompts.append({"prompt_token_ids": real_ids})
 
         # NOTE: per-request seeding was tried for reproducibility but does NOT
-        # achieve it on this hardware — temp-1 vLLM has a ~16% irreducible
+        # achieve it on this hardware: temp-1 vLLM has a ~16% irreducible
         # token-flip rate from GPU FP nondeterminism even with identical
         # seeds/inputs back-to-back. Rollouts are stochastic training data, so
         # engine-seed-only (set at LLM init) is the standard. `seed` is left in

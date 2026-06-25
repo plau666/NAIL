@@ -1,0 +1,58 @@
+[project]
+name = "nail"
+version = "0.1.0"
+description = "Reference implementation for Noise-Aware Imitation Learning."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "accelerate==1.13.0",
+    "datasets==4.8.3",
+    "einops==0.8.2",
+    "hydra-core==1.3.2",
+    "hydra-submitit-launcher==1.2.0",
+    "matplotlib==3.10.8",
+    "numpy==2.3.5",
+    "omegaconf==2.3.0",
+    "pandas==3.0.1",
+    "peft==0.18.1",
+    "pyyaml==6.0.3",
+    "safetensors==0.7.0",
+    "sentencepiece==0.2.1",
+    "submitit==1.5.3",
+    "torch==2.11.0+cu128",
+    "torchaudio==2.11.0+cu128",
+    "torchvision==0.26.0+cu128",
+    "tqdm==4.67.3",
+    "transformers==5.8.1",
+    "trl==0.29.1",
+    "vllm==0.20.2",
+    "wandb==0.25.1",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel==7.2.0",
+]
+
+[tool.uv]
+package = false
+index-strategy = "unsafe-best-match"
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128" },
+]
+torchaudio = [
+    { index = "pytorch-cu128" },
+]
+torchvision = [
+    { index = "pytorch-cu128" },
+]

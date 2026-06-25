@@ -1,23 +1,33 @@
-"""Forward on-policy distillation (NAIL-F / OPD-F) with LoRA.
+"""Reverse-KL on-policy distillation for GSM8K LoRA experiments.
 
-Hard-label CE on the expert's sampled token (the MC forward-KL surrogate) on
-the student's own rollout prefixes. STUDENT_TEMP=0 gives the NAIL-F variant
-(greedy prefixes); STUDENT_TEMP=1 gives OPD-F (temp-1 sampled prefixes).
-Checkpoints save adapter weights + optimizer + scheduler + RNG + global_step
-so that training can be fully resumed from any checkpoint.
+This trainer implements the reverse-KL family used by NAIL-R and OPD-R. The
+student rolls out completions, the expert scores actions at each visited
+prefix, and the student is updated with an importance-weighted score-function
+surrogate for KL(pi_theta || pi_expert).
+
+`student_temperature=0 --aux_sample` gives NAIL-R-style greedy rollouts with a
+fresh auxiliary student sample at each prefix. `student_temperature=1` without
+`--aux_sample` gives OPD-R-style sampled rollouts that reuse the rollout token
+as the reverse-KL Monte Carlo action.
+
+Loss normalization is global over the whole optimization step: post-EOT/EOS
+pad positions are masked out, and every real generated token receives weight
+`1 / total_real_tokens`. Checkpoints include LoRA weights, optimizer,
+scheduler, RNG state, epoch, and global step so runs can be resumed.
 
 Usage:
-    python forward_lora.py \
+    python trainers/reverse_kl.py \
         --student_model google/gemma-3-270m-it \
         --expert_model google/gemma-3-1b-it \
-        --train_data data/gsm8k/train.jsonl \
-        --output_dir output/forward_lora_r16_st1p0_egreedy \
-        --name forward_lora_r16_st1p0_egreedy \
-        --lora_rank 16 \
-        --student_temperature 1.0 --expert_temperature 0.0
+        --train_data data/tinygsm/tinygsm_400k.jsonl \
+        --output_dir output/nail_r \
+        --name nail_r \
+        --student_temperature 0.0 \
+        --expert_temperature 1.0 \
+        --aux_sample
 
     # Resume from latest:
-    python forward_lora.py ... --resume_from_checkpoint auto
+    python trainers/reverse_kl.py ... --resume_from_checkpoint auto
 """
 
 import argparse
@@ -43,10 +53,22 @@ from transformers import (
 from peft import LoraConfig, get_peft_model, PeftModel
 
 import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+GSM_DIR = os.path.dirname(THIS_DIR)
+
+# Keep vLLM in-process so LoRA adapters can be synced without forking after
+# CUDA initialization.
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+sys.path.insert(0, THIS_DIR)
+from vllm_on_policy_rollout import VLLMRolloutGenerator
+
+# gsm_utils.py lives in the parent dir (gsm/), one level up from this file.
+sys.path.insert(0, GSM_DIR)
 from gsm_utils import (
     evaluate_on_gsm8k,
     compute_eval_loss,
+    compute_rollout_diagnostics,
     SYSTEM_PROMPT,
 )
 
@@ -92,6 +114,12 @@ def collate_prompts(batch, tokenizer, system_prompt):
     }
 
 
+def get_logprobs_for_actions(logits, actions):
+    """log pi(a|s): log_softmax then gather."""
+    log_probs = F.log_softmax(logits, dim=-1)
+    return log_probs.gather(2, actions.unsqueeze(-1)).squeeze(-1)
+
+
 def resolve_resume_checkpoint(output_dir, arg_value):
     if not arg_value or arg_value.lower() == "none":
         return None
@@ -110,10 +138,8 @@ def save_checkpoint(save_path, model, tokenizer, optimizer, scheduler,
                     global_step, epoch, extra_state=None):
     """Save LoRA adapter + optimizer + scheduler + RNG + step so we can resume."""
     os.makedirs(save_path, exist_ok=True)
-    # Save adapter weights
     model.save_pretrained(save_path)
     tokenizer.save_pretrained(save_path)
-    # Save training state
     state = {
         "global_step": global_step,
         "epoch": epoch,
@@ -132,10 +158,9 @@ def save_checkpoint(save_path, model, tokenizer, optimizer, scheduler,
 
 
 def load_training_state(ckpt_path, optimizer, scheduler):
-    """Load optimizer/scheduler/RNG/step from a checkpoint."""
     state_path = os.path.join(ckpt_path, "trainer_state.pt")
     if not os.path.exists(state_path):
-        print(f"WARNING: {state_path} not found — will only restore model weights")
+        print(f"WARNING: {state_path} not found; will only restore model weights")
         return 0, 0
     state = torch.load(state_path, map_location="cpu", weights_only=False)
     optimizer.load_state_dict(state["optimizer"])
@@ -151,7 +176,7 @@ def load_training_state(ckpt_path, optimizer, scheduler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Forward-KL on-policy distillation (NAIL-F / OPD-F) with LoRA")
+    parser = argparse.ArgumentParser(description="Reverse-KL on-policy distillation (NAIL-R / OPD-R) with LoRA")
 
     parser.add_argument("--student_model", type=str, required=True)
     parser.add_argument("--expert_model", type=str, required=True)
@@ -176,6 +201,14 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--warmup_ratio", type=float, default=0.1)
     parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0,
+                        help="Clip global L2 norm of trainable-param gradients at "
+                             "this value. Set to 0 to disable clipping.")
+    parser.add_argument("--vllm_gpu_mem_util", type=float, default=0.15,
+                        help="Fraction of GPU memory for the colocated vLLM engine "
+                             "(weights + KV cache). Adjust this for your GPU; "
+                             "as a rule of thumb, reserve about 8 GB for vLLM "
+                             "when rollout batch size is 64.")
     parser.add_argument("--logging_steps", type=int, default=5)
     parser.add_argument("--save_steps", type=int, default=25)
     parser.add_argument("--save_total_limit", type=int, default=50)
@@ -185,8 +218,15 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--student_temperature", type=float, default=1.0,
                         help="Student rollout temperature. 0 = greedy")
-    parser.add_argument("--expert_temperature", type=float, default=0.0,
-                        help="Temperature for sampling from expert distribution. 0 = greedy/argmax")
+    parser.add_argument("--expert_temperature", type=float, default=1.0,
+                        help="Temperature applied to expert logits when computing log-probs")
+    parser.add_argument("--aux_sample", action="store_true", default=False,
+                        help="If set, draw a fresh auxiliary student token at each "
+                             "rollout prefix and use it (instead of the rollout token) "
+                             "as the reverse-KL MC sample. Set it when "
+                             "student_temperature=0 (NAIL-R). When "
+                             "student_temperature=1 (OPD-R), the default reuses "
+                             "the rollout token, which is unbiased.")
 
     parser.add_argument("--eval_steps", type=int, default=999999)
     parser.add_argument("--max_eval_examples", type=int, default=0)
@@ -198,7 +238,7 @@ def main():
                         help="Raw GSM8K jsonl (question/answer fields) for periodic eval loss. "
                              "Computed every save_steps.")
     parser.add_argument("--gsm8k_eval_loss_batch_size", type=int, default=4,
-                        help="Per-device batch size for GSM8K eval loss. Keep low (4) — "
+                        help="Per-device batch size for GSM8K eval loss. Keep low (4): "
                              "gemma-3 262k vocab fp32 logits are memory-heavy.")
 
     # LoRA
@@ -236,14 +276,12 @@ def main():
         tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
 
-
-    # --- Base student model ---
+    # --- Base student + LoRA wrap ---
     print(f"Loading base student: {args.student_model}")
     base_student = AutoModelForCausalLM.from_pretrained(
         args.student_model, torch_dtype=torch.bfloat16, trust_remote_code=True,
     ).to(device)
 
-    # --- LoRA wrap ---
     target_modules = args.lora_target_modules or DEFAULT_LORA_TARGETS
     lora_alpha = args.lora_alpha if args.lora_alpha is not None else 2 * args.lora_rank
     lora_config = LoraConfig(
@@ -264,8 +302,6 @@ def main():
         student = get_peft_model(base_student, lora_config)
 
     if args.gradient_checkpointing:
-        # PEFT + gradient checkpointing needs input grads so gradients
-        # can flow through frozen base weights to reach LoRA adapters.
         student.enable_input_require_grads()
         student.gradient_checkpointing_enable()
     student.train()
@@ -275,7 +311,7 @@ def main():
     print(f"Student total: {n_total:,} | Trainable (LoRA): {n_trainable:,} "
           f"({100 * n_trainable / n_total:.3f}%)")
 
-    # --- Expert model (frozen) ---
+    # --- Expert (frozen) ---
     print(f"Loading expert: {args.expert_model}")
     expert = AutoModelForCausalLM.from_pretrained(
         args.expert_model, torch_dtype=torch.bfloat16, trust_remote_code=True,
@@ -303,12 +339,13 @@ def main():
         drop_last=True,
     )
 
-    # --- Optimizer (only LoRA params have requires_grad=True) ---
+    # --- Optimizer (LoRA params only) ---
     trainable_params = [p for p in student.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
         trainable_params, lr=args.learning_rate, weight_decay=args.weight_decay,
     )
 
+    total_micro_steps = len(dataloader) * args.num_train_epochs
     total_steps = args.max_steps if args.max_steps > 0 else \
         len(dataloader) * args.num_train_epochs
     warmup_steps = int(total_steps * args.warmup_ratio)
@@ -326,22 +363,51 @@ def main():
     start_epoch = 0
     if resume_path and os.path.isdir(resume_path):
         start_step, start_epoch = load_training_state(resume_path, optimizer, scheduler)
+        if start_step >= total_steps:
+            print(f"Resumed step {start_step} >= total_steps {total_steps}; "
+                  f"nothing to do.")
+        else:
+            n_per_epoch = len(dataloader)
+            batches_left_in_epoch = n_per_epoch - (start_step % n_per_epoch)
+            wasted = n_per_epoch - batches_left_in_epoch
+            print(f"Resumed at step {start_step}/{total_steps} (epoch {start_epoch}). "
+                  f"NOTE: dataloader restarts from epoch start, so ~{wasted} batches "
+                  f"will be re-processed before reaching new work. Training will still "
+                  f"stop exactly at global_step={total_steps} (step-based hard cap).")
 
     # --- Generation config ---
+    # Stop rollouts at either the primary EOS token or chat-template turn-end
+    # markers such as Gemma's <end_of_turn>.
+    default_eos = getattr(base_student.generation_config, "eos_token_id", None)
+    stop_token_ids = default_eos if default_eos is not None else tokenizer.eos_token_id
+    print(f"Rollout stop tokens: {stop_token_ids}")
     if args.student_temperature == 0:
         gen_config = GenerationConfig(
             do_sample=False, num_beams=1,
             pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+            eos_token_id=stop_token_ids,
             max_new_tokens=args.max_new_tokens,
         )
     else:
         gen_config = GenerationConfig(
             do_sample=True, temperature=args.student_temperature, top_k=0,
             pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
+            eos_token_id=stop_token_ids,
             max_new_tokens=args.max_new_tokens,
         )
+
+    # --- Colocated vLLM rollout engine (in-process; truly-online per-step sync) ---
+    # Replaces student.generate() for the rollout ONLY. The expert forward and the
+    # student forward/backward that compute the loss stay in HF/PyTorch.
+    vllm_stop_token_ids = stop_token_ids if isinstance(stop_token_ids, list) else [stop_token_ids]
+    _dev = os.environ.get("CUDA_VISIBLE_DEVICES", "0").replace(",", "_")
+    print(f"Initializing colocated vLLM engine (gpu_mem_util={args.vllm_gpu_mem_util})...")
+    rollout_engine = VLLMRolloutGenerator(
+        args.student_model, max_lora_rank=args.lora_rank,
+        gpu_memory_utilization=args.vllm_gpu_mem_util,
+        max_model_len=4096, enforce_eager=False, seed=args.seed,
+        adapter_dir=f"/dev/shm/nail_vllm_adapter_dev{_dev}",
+    )
 
     # --- WandB ---
     wandb.init(project=args.wandb_project, name=args.name, config=config,
@@ -363,16 +429,23 @@ def main():
 
     # --- Training loop ---
     s_mode = "greedy" if args.student_temperature == 0 else f"temp={args.student_temperature}"
-    e_mode = "greedy" if args.expert_temperature == 0 else f"temp={args.expert_temperature}"
-    print(f"Starting simple OPD (LoRA) for {total_steps} steps "
-          f"(student={s_mode}, expert={e_mode})"
-          f"{' — resuming from step ' + str(start_step) if start_step else ''}")
+    print(f"Starting reverse-KL distillation (LoRA) for {total_steps} steps (student={s_mode})"
+          f"{' - resuming from step ' + str(start_step) if start_step else ''}")
     student.train()
     running_loss = 0.0
+    running_advantage = 0.0
+    # Running rollout-diagnostic accumulators (averaged over logging_steps)
+    running_pct_eos = 0.0
+    running_pct_boxed = 0.0
+    running_n_real = 0.0
+    running_alpha = 0.0
+    running_mean_seq_len = 0.0
+    running_gen_len = 0.0
+    # Gradient-clipping diagnostics
+    running_pre_clip_grad_norm = 0.0
+    running_grad_clipped = 0.0
     global_step = start_step
-    student_vocab_size = base_student.config.vocab_size
 
-    # Trim save_total_limit
     def enforce_save_limit():
         ckpts = sorted(glob.glob(os.path.join(args.output_dir, "checkpoint-*")),
                        key=lambda p: int(re.search(r"checkpoint-(\d+)", os.path.basename(p)).group(1)))
@@ -383,29 +456,26 @@ def main():
 
     for epoch in range(start_epoch, args.num_train_epochs):
         for batch in dataloader:
+            # Step-based hard cap (see note below); checked at top of iter
+            # so we don't even rollout on the (would-be) post-cap step.
+            if global_step >= total_steps:
+                break
+
             prompt_ids_full = batch["input_ids"].to(device)
             prompt_mask_full = batch["attention_mask"].to(device)
             P = prompt_ids_full.shape[1]
             total_B = prompt_ids_full.shape[0]
 
-            # === Student rollout (one big batch, with current LoRA adapter active) ===
-            # PeftModel.generate() delegates to base model's generate while keeping
-            # adapters in the forward path. KV cache is correct because adapters
-            # are applied inside k_proj/v_proj (cache stores post-adapter K/V).
-            student.eval()
-            if args.gradient_checkpointing:
-                student.gradient_checkpointing_disable()
-                student.config.use_cache = True
-            with torch.no_grad():
-                student_out_full = student.generate(
-                    input_ids=prompt_ids_full,
-                    attention_mask=prompt_mask_full,
-                    generation_config=gen_config,
-                )
-                gen_len = student_out_full.shape[1] - P
-            if args.gradient_checkpointing:
-                student.config.use_cache = False
-                student.gradient_checkpointing_enable()
+            # Sync the current LoRA into vLLM before rollout so the generated
+            # trajectory comes from the same policy being updated.
+            rollout_engine.sync(student)
+            student_out_full = rollout_engine.generate(
+                prompt_ids_full, prompt_mask_full, tokenizer.pad_token_id,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.student_temperature,
+                stop_token_ids=vllm_stop_token_ids,
+            )
+            gen_len = student_out_full.shape[1] - P
             student.train()
 
             if gen_len == 0:
@@ -416,39 +486,123 @@ def main():
                 torch.ones(total_B, gen_len, device=device, dtype=torch.long),
             ], dim=1)
 
-            # === Chunked expert forward + student forward/backward ===
+            # Build one pad mask and denominator for the whole optimization
+            # step, so every real generated token has the same loss weight.
+            rollout_actions_full = student_out_full[:, P:]
+            pad_mask_full = (rollout_actions_full != tokenizer.pad_token_id)
+            total_n_real = pad_mask_full.sum().clamp(min=1).to(torch.float32)
+
+            # === Rollout diagnostics (logged every logging_steps) ===
+            diag = compute_rollout_diagnostics(
+                rollout_actions_full, pad_mask_full,
+                tokenizer, stop_token_ids,
+            )
+
+            # === Chunked expert/student forward + backward ===
             optimizer.zero_grad()
             chunk_loss_sum = 0.0
+            chunk_adv_sum = 0.0
             for chunk_idx in range(n_chunks):
                 start = chunk_idx * args.batch_size
                 end = start + args.batch_size
                 full_seq = student_out_full[start:end]
                 full_mask = full_mask_full[start:end]
+                rollout_actions = full_seq[:, P:]
+                chunk_pad_mask_b = pad_mask_full[start:end]   # bool, [chunk_B, gen_len]
 
+                # Expert log-probs at every visited prefix (temperature-scaled).
                 with torch.no_grad():
-                    expert_logits = expert(
-                        input_ids=full_seq, attention_mask=full_mask,
-                    ).logits
-                answer_logits = expert_logits[:, P - 1 : P + gen_len - 1, :]
-                B, T, V = answer_logits.shape
+                    e_logits = expert(input_ids=full_seq, attention_mask=full_mask).logits
+                    e_answer_logits = e_logits[:, P - 1 : P + gen_len - 1, :]
+                    if args.expert_temperature != 1.0:
+                        e_answer_logits = e_answer_logits / args.expert_temperature
 
-                if args.expert_temperature == 0:
-                    expert_tokens = answer_logits.argmax(dim=-1)
+                # Loss-time student forward (with grad). Shared by both branches.
+                p_logits = student(input_ids=full_seq, attention_mask=full_mask).logits
+                p_answer_logits = p_logits[:, P - 1 : P + gen_len - 1, :]
+
+                if args.aux_sample:
+                    # Draw a fresh auxiliary student token at each prefix and
+                    # use it as the reverse-KL MC sample. Sampling uses the
+                    # loss-time p_theta; since q == p_theta exactly, IS weight = 1.
+                    # The aux sample is drawn at every position (including
+                    # post-EOS/EOT pad positions) for code simplicity, but the
+                    # pad-mask zeroes out those contributions in the loss.
+                    with torch.no_grad():
+                        aux_probs = F.softmax(p_answer_logits.detach().float(), dim=-1)
+                        Bc, Tc, Vc = aux_probs.shape
+                        actions = torch.multinomial(
+                            aux_probs.reshape(Bc * Tc, Vc), num_samples=1
+                        ).view(Bc, Tc)
+                    log_q = get_logprobs_for_actions(p_answer_logits.detach(), actions)
                 else:
-                    scaled_logits = answer_logits / args.expert_temperature
-                    probs = F.softmax(scaled_logits, dim=-1)
-                    expert_tokens = torch.multinomial(
-                        probs.view(B * T, V), num_samples=1
-                    ).view(B, T)
+                    # Default behaviour: reuse the rollout token as the MC sample.
+                    # Run a second (no-grad) student forward to recover log_q
+                    # at the rollout token.
+                    with torch.no_grad():
+                        q_logits = student(
+                            input_ids=full_seq, attention_mask=full_mask,
+                        ).logits
+                        q_answer_logits = q_logits[:, P - 1 : P + gen_len - 1, :]
+                        log_q = get_logprobs_for_actions(q_answer_logits, rollout_actions)
+                    actions = rollout_actions
 
-                labels = torch.full_like(full_seq, -100)
-                labels[:, P:] = expert_tokens
-                outputs = student(input_ids=full_seq, attention_mask=full_mask, labels=labels)
-                loss = outputs.loss / n_chunks
+                # Use the rollout pad mask for either reverse-KL action source.
+                # `chunk_pad_mask` is True at real (pre-EOS) positions of the
+                # ROLLOUT, False at post-EOS pads. This is the same mask
+                # whether we used the rollout action or a fresh aux sample;
+                # in both cases, positions where the rollout had already
+                # padded should not contribute to the loss.
+                answer_mask = chunk_pad_mask_b.to(p_answer_logits.dtype)
+
+                log_expert = get_logprobs_for_actions(e_answer_logits, actions)
+                advantage = log_expert - log_q
+
+                log_p = get_logprobs_for_actions(p_answer_logits, actions)
+                importance_weight = torch.exp(log_p - log_q.detach())
+
+                # Masked sum over the chunk, divided by GLOBAL real-token
+                # count. No per-chunk denominator. No /n_chunks. Each real
+                # token contributes 1/total_n_real to the accumulated gradient.
+                chunk_per_token = (
+                    importance_weight * advantage.detach() * answer_mask
+                )
+                chunk_loss_signed_sum = chunk_per_token.sum()
+                loss = -chunk_loss_signed_sum / total_n_real
                 loss.backward()
-                chunk_loss_sum += loss.item() * n_chunks
 
-            running_loss += chunk_loss_sum / n_chunks
+                # For logging, surface the chunk's contribution to the
+                # globally-normalized mean.
+                chunk_loss_sum += -chunk_loss_signed_sum.item()
+                chunk_adv_sum += (advantage * answer_mask).sum().item()
+
+            # train/loss: total negative IS-weighted advantage across the opt
+            # step's real tokens, divided by total_n_real -> comparable across
+            # steps regardless of how many tokens hit pad.
+            total_n_real_f = total_n_real.item()
+            running_loss += chunk_loss_sum / total_n_real_f
+            running_advantage += chunk_adv_sum / total_n_real_f
+
+            # Accumulate rollout diagnostics
+            running_pct_eos      += diag["pct_eos"]
+            running_pct_boxed    += diag["pct_boxed"]
+            running_n_real       += diag["n_real"]
+            running_alpha        += diag["alpha"]
+            running_mean_seq_len += diag["mean_seq_len"]
+            running_gen_len      += diag["gen_len"]
+
+            # `clip_grad_norm_` returns the norm before clipping; with
+            # max_grad_norm <= 0, max_norm=inf records the diagnostic without
+            # changing gradients. Only LoRA parameters require gradients.
+            trainable_params = [p for p in student.parameters() if p.requires_grad]
+            clip_value = args.max_grad_norm if args.max_grad_norm > 0 else float("inf")
+            pre_clip_grad_norm = torch.nn.utils.clip_grad_norm_(
+                trainable_params, max_norm=clip_value,
+            )
+            running_pre_clip_grad_norm += float(pre_clip_grad_norm)
+            running_grad_clipped += float(
+                args.max_grad_norm > 0 and pre_clip_grad_norm > args.max_grad_norm
+            )
 
             optimizer.step()
             scheduler.step()
@@ -456,14 +610,47 @@ def main():
 
             if global_step % args.logging_steps == 0:
                 avg_loss = running_loss / args.logging_steps
+                avg_adv = running_advantage / args.logging_steps
+                avg_pct_eos      = running_pct_eos      / args.logging_steps
+                avg_pct_boxed    = running_pct_boxed    / args.logging_steps
+                avg_n_real       = running_n_real       / args.logging_steps
+                avg_alpha        = running_alpha        / args.logging_steps
+                avg_mean_seq_len = running_mean_seq_len / args.logging_steps
+                avg_gen_len      = running_gen_len      / args.logging_steps
+                avg_pre_clip_grad_norm = running_pre_clip_grad_norm / args.logging_steps
+                avg_grad_clipped       = running_grad_clipped       / args.logging_steps
                 lr = scheduler.get_last_lr()[0]
                 wandb.log({
-                    "train/loss": avg_loss,
+                    "train/loss":          avg_loss,
+                    "train/advantage":     avg_adv,
                     "train/learning_rate": lr,
-                    "train/global_step": global_step,
+                    "train/global_step":   global_step,
+                    "train/pre_clip_grad_norm": avg_pre_clip_grad_norm,
+                    "train/grad_clipped":      avg_grad_clipped,
+                    "rollout/pct_eos":     avg_pct_eos,
+                    "rollout/pct_boxed":   avg_pct_boxed,
+                    "rollout/n_real":      avg_n_real,
+                    "rollout/alpha":       avg_alpha,
+                    "rollout/mean_seq_len":avg_mean_seq_len,
+                    "rollout/gen_len":     avg_gen_len,
                 }, step=global_step)
-                print(f"Step {global_step}/{total_steps} | loss: {avg_loss:.4f} | lr: {lr:.2e}")
+                print(f"Step {global_step}/{total_steps} | loss: {avg_loss:.4f} | "
+                      f"adv: {avg_adv:.4f} | EOS%: {100*avg_pct_eos:.1f} | "
+                      f"boxed%: {100*avg_pct_boxed:.1f} | alpha: {avg_alpha:.3f} | "
+                      f"n_real: {avg_n_real:.0f} | "
+                      f"len(mean/gen): {avg_mean_seq_len:.0f}/{avg_gen_len:.0f} | "
+                      f"|g|: {avg_pre_clip_grad_norm:.3f} (clip%: {100*avg_grad_clipped:.0f}) | "
+                      f"lr: {lr:.2e}")
                 running_loss = 0.0
+                running_advantage = 0.0
+                running_pct_eos = 0.0
+                running_pct_boxed = 0.0
+                running_n_real = 0.0
+                running_alpha = 0.0
+                running_mean_seq_len = 0.0
+                running_gen_len = 0.0
+                running_pre_clip_grad_norm = 0.0
+                running_grad_clipped = 0.0
 
             if args.eval_source and global_step % args.eval_steps == 0:
                 print(f"\n[Step {global_step}] Running GSM8K eval...")
@@ -499,13 +686,17 @@ def main():
                     wandb.log({"eval/loss": eval_loss,
                                "train/global_step": global_step}, step=global_step)
 
-            if args.max_steps > 0 and global_step > args.max_steps:
+            # Step-based hard cap. Once we reach `total_steps`, training stops
+            # regardless of which epoch we're in. This makes the script robust
+            # to preemption + resume; the dataloader restarts from epoch 0
+            # on resume, but we still terminate exactly at `total_steps`.
+            if global_step >= total_steps:
                 break
 
-        if args.max_steps > 0 and global_step > args.max_steps:
+        if global_step >= total_steps:
             break
 
-    # --- Final save (adapter + state) ---
+    # --- Final save ---
     final_path = os.path.join(args.output_dir, "final")
     save_checkpoint(final_path, student, tokenizer, optimizer, scheduler,
                     global_step, args.num_train_epochs)

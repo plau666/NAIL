@@ -1,59 +1,77 @@
 # NAIL — Noise-Aware Imitation Learning
 
-Reference implementation for the methods in *Noise-Aware Imitation Learning*:
-**NAIL-F**, **NAIL-R**, **NAIL-Mixed**, plus the **OPD-F** / **OPD-R** and
-**LogLossBC** baselines.
+Reference code for *Noise-Aware Imitation Learning*.
 
-Two self-contained training stacks live side by side:
+The repo has two experiment stacks:
 
-| Directory | Setting | Student / data |
-|---|---|---|
-| [`gsm/`](gsm/README.md) | LoRA fine-tuning on GSM8K | `gemma-3-270m-it` student distilled from `gemma-3-1b-it` expert; argparse + bash launchers |
-| [`modadd/`](modadd/README.md) | From-scratch on modular addition | Small transformer trained from scratch; Hydra-driven launcher |
+| Directory | What it runs |
+|---|---|
+| [`gsm/`](gsm/README.md) | LoRA distillation on GSM8K/TinyGSM with Gemma student/expert models. |
+| [`modadd/`](modadd/README.md) | Modular-addition experiments with a small transformer trained from scratch. |
 
-Each directory has its own `README.md` with a complete install / data-gen /
-train / eval recipe. They share no Python code — the synth side uses a
-Hydra-driven nanoGPT-style trainer; the real side uses argparse + custom
-training loops over Hugging Face + PEFT — but they implement the same
-algorithmic objectives.
+## Setup
 
-## Quick start
+Install once from the repo root:
 
 ```bash
-# clone, then install everything (gsm + modadd) once at the repo root
-cd <repo_root>
-uv venv .venv --python 3.11
+uv sync --locked
 source .venv/bin/activate
-uv pip install \
-    --index-strategy unsafe-best-match \
-    --extra-index-url https://download.pytorch.org/whl/cu128 \
-    -r requirements.txt
 ```
 
-`requirements.txt` covers both trainers — `torch`, `vllm`, `peft`,
-`transformers`, `hydra-core`, `omegaconf`, and the pinned transitives. After
-that, `cd gsm` or `cd modadd` and follow the sub-README.
+This creates `.venv/` from `uv.lock` and installs the dependencies for both
+experiment stacks, including PyTorch CUDA 12.8, vLLM, Transformers, PEFT,
+Hydra, and W&B.
 
-## Method ↔ entry-point map
+Then choose a stack:
 
-| Paper method | Real (LoRA / GSM8K) | Synth (Hydra / modadd) |
+```bash
+cd gsm      # real-model GSM8K/TinyGSM experiments
+# or
+cd modadd   # modular-addition experiments
+```
+
+## Quick Commands
+
+GSM:
+
+```bash
+cd gsm
+gunzip -k data/tinygsm/*.jsonl.gz
+bash scripts/train.sh configs/nail_mixed.yaml
+python eval/eval.py --run_dir output/<run_name> --mnts 512
+```
+
+Modular addition:
+
+```bash
+cd modadd
+python -m nanogpt.run experiment=modadd_nail
+```
+
+See [`gsm/README.md`](gsm/README.md) and [`modadd/README.md`](modadd/README.md)
+for the full commands.
+
+## Method Map
+
+GSM commands below are run from inside `gsm/`.
+
+| Method | GSM command | Modadd command |
 |---|---|---|
-| LogLossBC   | `gsm/run_offline_bc_lora.sh` | `python -m nanogpt.run experiment=modadd_noisy_bc` |
-| NAIL-F      | `gsm/run_NailF.sh`           | `python -m nanogpt.run experiment=modadd_nail` |
-| NAIL-R      | `gsm/run_NailR.sh`           | `python -m nanogpt.run experiment=modadd_nail_reverse_mc_fixed` |
-| NAIL-Mixed  | `gsm/run_NailMixed.sh`       | `python -m nanogpt.run experiment=modadd_nail task.loss=mixed task.kl_beta=…` |
-| OPD-F       | `gsm/run_OpdF.sh`            | `python -m nanogpt.run experiment=modadd_opd_forward` |
-| OPD-R       | `gsm/run_OpdR.sh`            | `python -m nanogpt.run experiment=modadd_opd` |
+| LogLossBC | `bash scripts/train.sh configs/offline_bc.yaml` | `python -m nanogpt.run experiment=modadd_noisy_bc` |
+| NAIL-F | `bash scripts/train.sh configs/nail_f.yaml` | `python -m nanogpt.run experiment=modadd_nail` |
+| NAIL-R | `bash scripts/train.sh configs/nail_r.yaml` | `python -m nanogpt.run experiment=modadd_nail_reverse_mc_fixed` |
+| NAIL-Mixed | `bash scripts/train.sh configs/nail_mixed.yaml` | `python -m nanogpt.run experiment=modadd_nail task.loss=mixed task.kl_beta=<beta>` |
+| OPD-F | `bash scripts/train.sh configs/opd_f.yaml` | `python -m nanogpt.run experiment=modadd_opd_forward` |
+| OPD-R | `bash scripts/train.sh configs/opd_r.yaml` | `python -m nanogpt.run experiment=modadd_opd` |
 
 ## Hardware
 
-All experiments run on a single A100 40 GB. bf16 throughout. Multi-GPU is not
-required for any result.
+The reported experiments use a single A100 40 GB with bf16. Multi-GPU training
+is not required.
 
 ## Attribution
 
-The base causal transformer in `modadd/model.py` and the `nanogpt`
-package name are derived from Andrej Karpathy's
-[nanoGPT](https://github.com/karpathy/nanoGPT), MIT licensed (see `LICENSE`).
-All training-loop code under `modadd/nanogpt/{methods,trainers,pipelines,workers}/`
-and all of `gsm/` is original to NAIL.
+The base causal transformer in `modadd/model.py` and the `nanogpt` package name
+are derived from Andrej Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT),
+MIT licensed. The NAIL training loops and all code under `gsm/` are original to
+this project.

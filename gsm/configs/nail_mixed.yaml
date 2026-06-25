@@ -1,0 +1,33 @@
+method: nail-mixed
+
+student_model: google/gemma-3-270m-it
+student_short: gemma270m_it
+expert_model: google/gemma-3-1b-it
+expert_short: gemma3_1b_it
+train_data: data/tinygsm/tinygsm_400k.jsonl
+prompt_field: question
+
+student_temperature: 0.0
+expert_temperature: 1.0
+beta: 0.5
+aux_sample: true
+
+epochs: 1
+bsz: 4
+grad_accum: 16
+lr: 1.0e-4
+max_grad_norm: 1.0
+max_new_tokens: 1024
+save_steps: 200
+save_total_limit: 50
+seed: 42
+
+lora_rank: 128
+lora_dropout: 0.0
+
+gpu: 0
+wandb_project: NAIL
+gsm8k_eval_loss_data: data/gsm8k/test.jsonl
+gsm8k_eval_loss_bsz: 8
+vllm_gpu_mem_util: 0.15
+skip_initial_eval: true
