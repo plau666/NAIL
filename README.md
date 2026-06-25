@@ -30,9 +30,10 @@ transformers:        5.8.1
 peft:                0.18.1
 ```
 
-Use `uv sync --locked`, not an unlocked dependency solve. The locked vLLM wheel
-has been checked to link against `libcudart.so.12`, matching the CUDA-12 runtime
-installed by the PyTorch CUDA 12.8 wheels.
+Use `uv sync --locked`, not an unlocked dependency solve. `pyproject.toml` pins
+vLLM to a specific CUDA-12 wheel artifact, and that wheel has been checked to
+link against `libcudart.so.12`, matching the CUDA-12 runtime installed by the
+PyTorch CUDA 12.8 wheels.
 
 Then choose a stack:
 

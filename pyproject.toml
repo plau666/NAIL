@@ -28,9 +28,9 @@ dependencies = [
     "tqdm==4.67.3",
     "transformers==5.8.1",
     "trl==0.29.1",
-    # uv resolves vLLM by the public version 0.20.2. The exact wheel artifact is
-    # pinned by uv.lock; the locked wheel reports 0.20.2+cu124 in metadata and
-    # links against libcudart.so.12.
+    # vLLM is pinned to a CUDA-12 wheel artifact in [tool.uv.sources] below.
+    # The wheel reports 0.20.2+cu124 in metadata and links against
+    # libcudart.so.12.
     "vllm==0.20.2",
     "wandb==0.25.1",
 ]
@@ -53,6 +53,7 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
+vllm = { url = "https://files.pythonhosted.org/packages/c5/aa/4488d49c481a2184e6e285b8d3f937905205f52cd5ac30fb348770494b6e/vllm-0.20.2-cp38-abi3-manylinux_2_35_x86_64.whl" }
 torch = [
     { index = "pytorch-cu128" },
 ]
