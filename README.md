@@ -1,6 +1,4 @@
-# NAIL — Noise-Aware Imitation Learning
-
-Reference code for *Noise-Aware Imitation Learning*.
+# NAIL — Noise-robust Aggregation for Imitation Learning
 
 The repo has two experiment stacks:
 
@@ -30,24 +28,6 @@ cd gsm      # real-model GSM8K/TinyGSM experiments
 cd modadd   # modular-addition experiments
 ```
 
-## Quick Commands
-
-GSM:
-
-```bash
-cd gsm
-gunzip -k data/tinygsm/*.jsonl.gz
-bash scripts/train.sh configs/nail_mixed.yaml
-python eval/eval.py --run_dir output/<run_name> --mnts 512
-```
-
-Modular addition:
-
-```bash
-cd modadd
-python -m nanogpt.run experiment=modadd_nail
-```
-
 See [`gsm/README.md`](gsm/README.md) and [`modadd/README.md`](modadd/README.md)
 for the full commands.
 
@@ -64,14 +44,9 @@ GSM commands below are run from inside `gsm/`.
 | OPD-F | `bash scripts/train.sh configs/opd_f.yaml` | `python -m nanogpt.run experiment=modadd_opd_forward` |
 | OPD-R | `bash scripts/train.sh configs/opd_r.yaml` | `python -m nanogpt.run experiment=modadd_opd` |
 
-## Hardware
-
-The reported experiments use a single A100 40 GB with bf16. Multi-GPU training
-is not required.
 
 ## Attribution
 
 The base causal transformer in `modadd/model.py` and the `nanogpt` package name
 are derived from Andrej Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT),
-MIT licensed. The NAIL training loops and all code under `gsm/` are original to
-this project.
+MIT licensed. 
