@@ -26,13 +26,13 @@ them without deleting the compressed copy.
 If you want to run LogLossBC, generate teacher rollouts first; see
 [OfflineBC](#offlinebc). The online methods do not need this step.
 
-3. Run one experiment.
+3. Run one experiment. See [Training](#training).
 
 ```bash
 bash scripts/train.sh configs/<config>.yaml
 ```
 
-4. Evaluate a run.
+4. Evaluate a run. See [Evaluation](#evaluation).
 
 ```bash
 python eval/eval.py --run_dir output/<run_name> --mnts 512
@@ -155,8 +155,5 @@ gsm/
 
 - W&B logging uses `WANDB_PROJECT=NAIL` by default. Run `wandb login` first if
   you want online logging.
-- The reported GSM experiments use a single A100 40 GB with bf16.
 - On-policy methods use vLLM during training. Adjust `VLLM_GPU_MEM_UTIL` if the
   rollout engine needs more or less GPU memory.
-- The shared system prompt is:
-  `"Please reason step by step, and put your final answer within \\boxed{}."`
