@@ -19,6 +19,9 @@ dependencies = [
     "safetensors==0.7.0",
     "sentencepiece==0.2.1",
     "submitit==1.5.3",
+    # CUDA runtime libraries are provided transitively by these PyTorch CUDA
+    # 12.8 wheels. Do not add `nvidia-cuda-runtime>=13`; that would introduce
+    # libcudart.so.13 into this CUDA-12 environment.
     "torch==2.11.0+cu128",
     "torchaudio==2.11.0+cu128",
     "torchvision==0.26.0+cu128",
