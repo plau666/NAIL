@@ -25,6 +25,8 @@ dependencies = [
     "tqdm==4.67.3",
     "transformers==5.8.1",
     "trl==0.29.1",
+    # The PyPI wheel for vLLM 0.20.2 reports version 0.20.2+cu124 in metadata,
+    # but uv resolves it by the public version 0.20.2.
     "vllm==0.20.2",
     "wandb==0.25.1",
 ]
