@@ -1,4 +1,4 @@
-# NAIL — Noise-robust Aggregation for Imitation Learning
+# NAIL — Noise-Aware Imitation Learning
 
 The repo has two experiment stacks:
 
@@ -47,20 +47,21 @@ for the full commands.
 
 ## Method Map
 
-GSM commands below are run from inside `gsm/`.
+Commands below are run from inside the corresponding stack directory.
+For `modadd/`, first run `modadd_prompt_bank` and `modadd_cot`; LogLossBC also
+requires `modadd_noisy_render`.
 
 | Method | GSM command | Modadd command |
 |---|---|---|
-| LogLossBC | `bash scripts/train.sh configs/offline_bc.yaml` | `python -m nanogpt.run experiment=modadd_noisy_bc` |
-| NAIL-F | `bash scripts/train.sh configs/nail_f.yaml` | `python -m nanogpt.run experiment=modadd_nail` |
-| NAIL-R | `bash scripts/train.sh configs/nail_r.yaml` | `python -m nanogpt.run experiment=modadd_nail_reverse_mc_fixed` |
-| NAIL-Mixed | `bash scripts/train.sh configs/nail_mixed.yaml` | `python -m nanogpt.run experiment=modadd_nail task.loss=mixed task.kl_beta=<beta>` |
-| OPD-F | `bash scripts/train.sh configs/opd_f.yaml` | `python -m nanogpt.run experiment=modadd_opd_forward` |
-| OPD-R | `bash scripts/train.sh configs/opd_r.yaml` | `python -m nanogpt.run experiment=modadd_opd` |
-
+| LogLossBC | `bash scripts/train.sh configs/offline_bc.yaml` | `bash scripts/train.sh experiment=modadd_noisy_bc` |
+| NAIL-F | `bash scripts/train.sh configs/nail_f.yaml` | `bash scripts/train.sh experiment=modadd_nail` |
+| NAIL-R | `bash scripts/train.sh configs/nail_r.yaml` | `bash scripts/train.sh experiment=modadd_nail_reverse_mc_fixed` |
+| NAIL-Mixed | `bash scripts/train.sh configs/nail_mixed.yaml` | `bash scripts/train.sh experiment=modadd_nail task.loss=mixed task.kl_beta=<beta>` |
+| OPD-F | `bash scripts/train.sh configs/opd_f.yaml` | `bash scripts/train.sh experiment=modadd_opd_forward` |
+| OPD-R | `bash scripts/train.sh configs/opd_r.yaml` | `bash scripts/train.sh experiment=modadd_opd` |
 
 ## Attribution
 
 The base causal transformer in `modadd/model.py` and the `nanogpt` package name
 are derived from Andrej Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT),
-MIT licensed. 
+MIT licensed.

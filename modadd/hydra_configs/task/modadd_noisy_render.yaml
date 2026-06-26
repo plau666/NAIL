@@ -21,7 +21,7 @@ task:
     random_suffix_mode: valid_tokens
     keep_format_tokens: true
     seed: ${task.render_seed}
-    apply_to: both
+    apply_to: modadd
     coord_strategy: cyclic
     fixed_coord: 0
     eligible_values: [1, 2, 3, 4, 5]

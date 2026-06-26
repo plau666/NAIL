@@ -24,8 +24,6 @@ class PretrainConfig:
     wandb_run_id: str | None
     wandb_init_timeout: int
     dataset: str
-    s5_mode: str
-    s5_m: int
     modadd_p: int
     modadd_m: int
     gradient_accumulation_steps: int
@@ -50,21 +48,17 @@ class PretrainConfig:
     device: str
     dtype: str
     compile: bool
-    s5_eval_metrics: bool
-    s5_eval_clean_train_loss: bool
     modadd_eval_metrics: bool
     modadd_eval_clean_train_loss: bool
-    s5_eval_n: int
-    s5_eval_batch_size: int
-    s5_eval_seed: int
+    eval_n: int
+    eval_batch_size: int
+    eval_seed: int
     save_every: int
     offline_single_epoch: bool
     offline_eval_full: bool
     offline_train_subset_size: int
     offline_train_shuffle: bool
     offline_target_type: str
-    offline_eval_diagnostics: bool
-    offline_eval_diagnostics_loss_threshold: float
     final_eval_on_exit: bool
     torchrun: TorchrunConfig
     python_bin: str
@@ -90,7 +84,6 @@ class StudentPrefixConfig:
     subset_size: int
     eta: float
     teacher_law: str
-    semantic_key_noise: dict[str, object]
     random_suffix_noise: dict[str, object]
     teacher_signal: str
     loss: str
@@ -165,9 +158,9 @@ def project_pretrain_config(cfg: AppConfig) -> PretrainConfig:
         if not cfg.optim.init_from_ckpt:
             raise ValueError("init_from='warm_start' requires init_from_ckpt")
         if cfg.optim.continue_from_subset_size > 0:
-            if not cfg.task.dataset.startswith(("s5_clean_offline", "s5_noisy_offline", "modadd_clean_offline", "modadd_noisy_offline")):
+            if not cfg.task.dataset.startswith(("modadd_clean_offline", "modadd_noisy_offline")):
                 raise ValueError(
-                    "continue_from_subset_size is only supported for synthetic offline datasets"
+                    "continue_from_subset_size is only supported for modular-addition offline datasets"
                 )
             if not cfg.optim.offline_single_epoch:
                 raise ValueError("continue_from_subset_size requires offline_single_epoch=True")
@@ -193,8 +186,6 @@ def project_pretrain_config(cfg: AppConfig) -> PretrainConfig:
         wandb_run_id=cfg.logging.wandb_run_id,
         wandb_init_timeout=cfg.logging.wandb_init_timeout,
         dataset=cfg.task.dataset,
-        s5_mode=cfg.task.s5_mode,
-        s5_m=cfg.task.s5_m,
         modadd_p=cfg.task.modadd_p,
         modadd_m=cfg.task.modadd_m,
         gradient_accumulation_steps=cfg.optim.gradient_accumulation_steps,
@@ -219,23 +210,17 @@ def project_pretrain_config(cfg: AppConfig) -> PretrainConfig:
         device=cfg.runtime.device,
         dtype=cfg.runtime.dtype,
         compile=cfg.runtime.compile,
-        s5_eval_metrics=cfg.optim.s5_eval_metrics,
-        s5_eval_clean_train_loss=cfg.optim.s5_eval_clean_train_loss,
         modadd_eval_metrics=cfg.optim.modadd_eval_metrics,
         modadd_eval_clean_train_loss=cfg.optim.modadd_eval_clean_train_loss,
-        s5_eval_n=cfg.optim.s5_eval_n,
-        s5_eval_batch_size=cfg.optim.s5_eval_batch_size,
-        s5_eval_seed=cfg.optim.s5_eval_seed,
+        eval_n=cfg.optim.eval_n,
+        eval_batch_size=cfg.optim.eval_batch_size,
+        eval_seed=cfg.optim.eval_seed,
         save_every=cfg.optim.save_every,
         offline_single_epoch=cfg.optim.offline_single_epoch,
         offline_eval_full=cfg.optim.offline_eval_full,
         offline_train_subset_size=cfg.optim.offline_train_subset_size,
         offline_train_shuffle=cfg.optim.offline_train_shuffle,
         offline_target_type=cfg.optim.offline_target_type,
-        offline_eval_diagnostics=cfg.optim.offline_eval_diagnostics,
-        offline_eval_diagnostics_loss_threshold=(
-            cfg.optim.offline_eval_diagnostics_loss_threshold
-        ),
         final_eval_on_exit=cfg.optim.final_eval_on_exit,
         torchrun=cfg.runtime.torchrun,
         python_bin=python_bin,
@@ -276,7 +261,6 @@ def _project_student_prefix_config(
         subset_size=cfg.task.subset_size,
         eta=cfg.task.eta,
         teacher_law=cfg.task.teacher_law,
-        semantic_key_noise=asdict(cfg.task.semantic_key_noise),
         random_suffix_noise=asdict(cfg.task.random_suffix_noise),
         teacher_signal=cfg.task.teacher_signal,
         loss=cfg.task.loss,

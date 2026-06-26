@@ -54,13 +54,11 @@ continue_from_subset_size = 0
 # wandb logging
 wandb_log = False  # disabled by default
 wandb_project = 'NAIL'
-wandb_run_name = 's5-cot'  # 'run' + str(time.time())
+wandb_run_name = 'modadd-cot'
 wandb_run_id = ''
 wandb_init_timeout = 300
 # data
-dataset = 's5_cot'
-s5_mode = 'cot'
-s5_m = 21
+dataset = 'modadd_cot'
 modadd_p = 7
 modadd_m = 21
 gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
@@ -93,22 +91,17 @@ dtype = 'bfloat16' if torch.cuda.is_available(
 ) and torch.cuda.is_bf16_supported() else 'float16'
 compile = True  # use PyTorch 2.0 to compile the model to be faster
 
-# S5 evaluation/checkpoint extras
-s5_eval_metrics = False
-s5_eval_clean_train_loss = False
 modadd_eval_metrics = False
 modadd_eval_clean_train_loss = False
-s5_eval_n = 256
-s5_eval_batch_size = 256
-s5_eval_seed = 123
+eval_n = 256
+eval_batch_size = 256
+eval_seed = 123
 save_every = 0  # 0 disables numbered checkpoints
 offline_single_epoch = False
 offline_eval_full = True
 offline_train_subset_size = 0
 offline_train_shuffle = False
 offline_target_type = 'tokens'
-offline_eval_diagnostics = False
-offline_eval_diagnostics_loss_threshold = 1.0
 final_eval_on_exit = False
 # -----------------------------------------------------------------------------
 config_keys = [k for k, v in globals().items() if not k.startswith(
@@ -175,16 +168,10 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(
 def synthetic_task_name(dataset_name):
     # Synthetic offline datasets are the rendered noisy-expert trajectory
     # datasets used by LogLossBC/SFT in the paper. Clean expert training uses
-    # the non-offline task names (`s5_cot`, `modadd_cot`, `modadd_base`).
-    if dataset_name == 's5_cot' or dataset_name.startswith('s5_clean_offline') or dataset_name.startswith('s5_noisy_offline'):
-        return 's5'
+    # the non-offline task names (`modadd_cot`, `modadd_base`).
     if dataset_name in ('modadd_cot', 'modadd_base') or dataset_name.startswith('modadd_clean_offline') or dataset_name.startswith('modadd_noisy_offline'):
         return 'modadd'
     return None
-
-
-def is_s5_offline_dataset(name):
-    return name.startswith('s5_clean_offline') or name.startswith('s5_noisy_offline')
 
 
 def is_modadd_offline_dataset(name):
@@ -192,7 +179,7 @@ def is_modadd_offline_dataset(name):
 
 
 def is_synthetic_offline_dataset(name):
-    return is_s5_offline_dataset(name) or is_modadd_offline_dataset(name)
+    return is_modadd_offline_dataset(name)
 
 
 def normalize_offline_dataset_name(name):
@@ -200,11 +187,11 @@ def normalize_offline_dataset_name(name):
 
 
 def synthetic_eval_metrics_enabled(task_name):
-    return (task_name == 's5' and s5_eval_metrics) or (task_name == 'modadd' and modadd_eval_metrics)
+    return task_name == 'modadd' and modadd_eval_metrics
 
 
 def synthetic_clean_train_loss_enabled(task_name):
-    return (task_name == 's5' and s5_eval_clean_train_loss) or (task_name == 'modadd' and modadd_eval_clean_train_loss)
+    return task_name == 'modadd' and modadd_eval_clean_train_loss
 
 
 def synthetic_report_cot_exact(task_name):
@@ -215,8 +202,8 @@ synthetic_task = synthetic_task_name(dataset)
 
 # synthetic task hooks
 if is_synthetic_offline_dataset(dataset):
-    from data.synthetic.offline_dataset import get_batch as synthetic_offline_get_batch
-    from data.synthetic.offline_dataset import (
+    from data.common.offline_dataset import get_batch as synthetic_offline_get_batch
+    from data.common.offline_dataset import (
         get_train_batch_once,
         get_train_epoch_state,
         iter_eval_batches,
@@ -224,21 +211,8 @@ if is_synthetic_offline_dataset(dataset):
         reset_train_epoch,
         set_train_epoch_state,
     )
-    from data.synthetic.offline_losses import offline_teacher_prob_loss_from_logits
-if synthetic_task == 's5':
-    from data.s5_cot.task import VOCAB_SIZE as s5_vocab_size
-    from nanogpt.methods.student_prefix import forward_kl_full_loss
-    from data.s5_cot.task import (
-        estimate_saved_clean_train_loss as s5_estimate_saved_clean_train_loss,
-        evaluate_saved_clean_s5_metrics,
-    )
-    from data.s5_cot.validation_diagnostics import (
-        evaluate_s5_offline_validation_diagnostics,
-    )
-    if dataset == 's5_cot':
-        from data.s5_cot.task import evaluate_clean_s5_metrics
-        from data.s5_cot.task import get_batch as s5_get_batch
-elif synthetic_task == 'modadd':
+    from data.common.offline_losses import offline_teacher_prob_loss_from_logits
+if synthetic_task == 'modadd':
     from data.modular_addition.task import (
         estimate_saved_clean_train_loss as modadd_estimate_saved_clean_train_loss,
         evaluate_saved_clean_modadd_metrics,
@@ -270,10 +244,10 @@ if offline_target_type == 'teacher_probs':
     # Full-distribution LogLossBC: instead of hard rendered tokens, train on
     # saved teacher next-token probabilities. The paper's main LogLossBC runs
     # use hard token targets, but this supports the full-information ablation.
-    if not is_s5_offline_dataset(dataset):
+    if not is_modadd_offline_dataset(dataset):
         raise ValueError(
             "offline_target_type='teacher_probs' is currently only supported "
-            "for S5 offline datasets"
+            "for modular-addition offline datasets"
         )
     if offline_dataset_meta is None:
         raise ValueError(
@@ -286,17 +260,15 @@ if offline_target_type == 'teacher_probs':
             "'teacher_probs'"
         )
     dataset_teacher_law = offline_dataset_meta.get("teacher_law")
-    if dataset_teacher_law not in ("distributional_noise", "semantic_key_noise", "random_suffix_after_error"):
+    if dataset_teacher_law not in ("distributional_noise", "random_suffix_after_error"):
         raise ValueError(
             f"Dataset {dataset} has teacher_law="
             f"{dataset_teacher_law!r}, expected 'distributional_noise' "
-            "'semantic_key_noise', or 'random_suffix_after_error' for "
+            "or 'random_suffix_after_error' for "
             "offline full-distribution BC"
         )
     expected_decode_mode = (
-        "semantic_key_noise_sample"
-        if dataset_teacher_law == "semantic_key_noise"
-        else "random_suffix_after_error_sample"
+        "random_suffix_after_error_sample"
         if dataset_teacher_law == "random_suffix_after_error"
         else "sample_then_corrupt"
     )
@@ -379,14 +351,7 @@ elif init_from_ckpt:
 
 
 def get_batch(split, target_type=None):
-    if dataset == 's5_cot':
-        return s5_get_batch(
-            batch_size=batch_size,
-            device=device,
-            mode=s5_mode,
-            m=s5_m,
-        )
-    elif dataset in ('modadd_cot', 'modadd_base'):
+    if dataset in ('modadd_cot', 'modadd_base'):
         return modadd_get_batch(
             batch_size=batch_size,
             device=device,
@@ -462,10 +427,7 @@ best_val_loss = 1e9
 # attempt to derive vocab_size from the dataset
 meta_vocab_size = None
 is_synthetic = synthetic_task is not None
-if synthetic_task == 's5':
-    meta_vocab_size = s5_vocab_size
-    print(f"using synthetic vocab_size = {meta_vocab_size} for {dataset}")
-elif synthetic_task == 'modadd':
+if synthetic_task == 'modadd':
     meta_vocab_size = modadd_vocab_size(resolved_modadd_p)
     print(f"using modular-addition vocab_size = {meta_vocab_size} for {dataset} (p={resolved_modadd_p}, m={resolved_modadd_m})")
 else:
@@ -498,8 +460,6 @@ elif init_from == 'resume':
     checkpoint_config = checkpoint.get('config', {})
     for key in [
         'dataset',
-        's5_mode',
-        's5_m',
         'modadd_p',
         'modadd_m',
         'offline_single_epoch',
@@ -521,8 +481,7 @@ elif init_from == 'resume':
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
     state_dict = checkpoint['model']
-    # fix the keys of the state dictionary :(
-    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+    # Normalize state dicts saved from compiled models.
     unwanted_prefix = '_orig_mod.'
     for k, v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
@@ -554,20 +513,12 @@ elif init_from == 'warm_start':
                     f"Warm-start mismatch for {key}: checkpoint has {checkpoint_config[key]!r}, "
                     f"current config requests {globals()[key]!r}"
                 )
-        if synthetic_task == 'modadd':
-            for key in ['modadd_p', 'modadd_m']:
-                if key in checkpoint_config and int(checkpoint_config[key]) != int(globals()[key]):
-                    raise ValueError(
-                        f"Warm-start mismatch for {key}: checkpoint has {checkpoint_config[key]!r}, "
-                        f"current config requests {globals()[key]!r}"
-                    )
-        elif synthetic_task == 's5':
-            for key in ['s5_mode', 's5_m']:
-                if key in checkpoint_config and checkpoint_config[key] != globals()[key]:
-                    raise ValueError(
-                        f"Warm-start mismatch for {key}: checkpoint has {checkpoint_config[key]!r}, "
-                        f"current config requests {globals()[key]!r}"
-                    )
+        for key in ['modadd_p', 'modadd_m']:
+            if key in checkpoint_config and int(checkpoint_config[key]) != int(globals()[key]):
+                raise ValueError(
+                    f"Warm-start mismatch for {key}: checkpoint has {checkpoint_config[key]!r}, "
+                    f"current config requests {globals()[key]!r}"
+                )
         if continue_from_subset_size > 0:
             source_state = checkpoint.get('offline_train_state')
             if source_state is None:
@@ -695,62 +646,27 @@ def estimate_loss():
 
         if synthetic_eval_metrics_enabled(synthetic_task):
             eval_model = raw_model if 'raw_model' in globals() else model
-            if synthetic_task == 's5':
-                metrics = evaluate_saved_clean_s5_metrics(
-                    eval_model,
-                    device=device,
-                    data_dir=data_dir,
-                    n_eval=s5_eval_n,
-                    batch_size=s5_eval_batch_size,
-                )
-            else:
-                metrics = evaluate_saved_clean_modadd_metrics(
-                    eval_model,
-                    device=device,
-                    data_dir=data_dir,
-                    n_eval=s5_eval_n,
-                    batch_size=s5_eval_batch_size,
-                )
+            metrics = evaluate_saved_clean_modadd_metrics(
+                eval_model,
+                device=device,
+                data_dir=data_dir,
+                n_eval=eval_n,
+                batch_size=eval_batch_size,
+            )
             if synthetic_report_cot_exact(synthetic_task):
                 out["val_cot_exact"] = metrics["cot_exact"]
             out["val_clean_full_exact"] = metrics["clean_full_exact"]
             out["val_clean_final_exact"] = metrics["clean_final_exact"]
         if synthetic_clean_train_loss_enabled(synthetic_task):
             eval_model = raw_model if 'raw_model' in globals() else model
-            if synthetic_task == 's5':
-                out["train_clean_oracle"] = s5_estimate_saved_clean_train_loss(
-                    eval_model,
-                    device=device,
-                    data_dir=data_dir,
-                    eval_iters=eval_iters,
-                    batch_size=batch_size,
-                    subset_size=offline_train_subset_size,
-                )
-            else:
-                out["train_clean_oracle"] = modadd_estimate_saved_clean_train_loss(
-                    eval_model,
-                    device=device,
-                    data_dir=data_dir,
-                    eval_iters=eval_iters,
-                    batch_size=batch_size,
-                    subset_size=offline_train_subset_size,
-                )
-
-        if offline_eval_diagnostics and synthetic_task == 's5':
-            eval_model = raw_model if 'raw_model' in globals() else model
-            diagnostic_metrics, _ = evaluate_s5_offline_validation_diagnostics(
+            out["train_clean_oracle"] = modadd_estimate_saved_clean_train_loss(
                 eval_model,
                 device=device,
                 data_dir=data_dir,
-                n_eval=s5_eval_n,
-                batch_size=s5_eval_batch_size,
-                loss_threshold=offline_eval_diagnostics_loss_threshold,
-                autocast_context=ctx,
+                eval_iters=eval_iters,
+                batch_size=batch_size,
+                subset_size=offline_train_subset_size,
             )
-            out.update({
-                f"val/{key}": value
-                for key, value in diagnostic_metrics.items()
-            })
 
     else:
         for split in ['train', 'val']:
@@ -764,26 +680,16 @@ def estimate_loss():
 
         if synthetic_eval_metrics_enabled(synthetic_task):
             eval_model = raw_model if 'raw_model' in globals() else model
-            if synthetic_task == 's5':
-                metrics = evaluate_clean_s5_metrics(
-                    eval_model,
-                    device=device,
-                    n_eval=s5_eval_n,
-                    m=s5_m,
-                    seed=s5_eval_seed,
-                    batch_size=s5_eval_batch_size,
-                )
-            else:
-                metrics = evaluate_clean_modadd_metrics(
-                    eval_model,
-                    device=device,
-                    p=resolved_modadd_p,
-                    m=resolved_modadd_m,
-                    n_eval=s5_eval_n,
-                    seed=s5_eval_seed,
-                    batch_size=s5_eval_batch_size,
-                    mode=modadd_mode,
-                )
+            metrics = evaluate_clean_modadd_metrics(
+                eval_model,
+                device=device,
+                p=resolved_modadd_p,
+                m=resolved_modadd_m,
+                n_eval=eval_n,
+                seed=eval_seed,
+                batch_size=eval_batch_size,
+                mode=modadd_mode,
+            )
             if synthetic_report_cot_exact(synthetic_task):
                 out["val_cot_exact"] = metrics["cot_exact"]
             out["val_clean_full_exact"] = metrics["clean_full_exact"]

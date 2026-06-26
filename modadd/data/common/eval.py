@@ -4,7 +4,7 @@ import os
 
 import torch
 
-from data.synthetic.prompt_bank import build_xy_from_prompt_and_target
+from data.common.prompt_bank import build_xy_from_prompt_and_target
 
 
 @torch.no_grad()

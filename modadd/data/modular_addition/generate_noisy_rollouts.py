@@ -55,7 +55,7 @@ def parse_args():
     parser.add_argument("--random_suffix_noise_mode", choices=("valid_tokens",), default="valid_tokens")
     parser.add_argument("--random_suffix_noise_keep_format_tokens", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--random_suffix_noise_seed", type=int, default=1337)
-    parser.add_argument("--random_suffix_noise_apply_to", choices=("s5", "modadd", "both"), default="both")
+    parser.add_argument("--random_suffix_noise_apply_to", choices=("modadd",), default="modadd")
     return parser.parse_args()
 
 

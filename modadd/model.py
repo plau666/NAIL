@@ -1,4 +1,4 @@
-"""Compact causal transformer used by the synthetic experiments."""
+"""Compact causal transformer used by the modular-addition experiments."""
 
 import math
 import inspect
@@ -151,7 +151,7 @@ class Block(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    vocab_size: int = 50304 # padded default for non-synthetic token datasets
+    vocab_size: int = 50304 # padded default for token datasets
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
@@ -174,10 +174,11 @@ class GPT(nn.Module):
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # with weight tying when using torch.compile() some warnings get generated:
+        # With weight tying, torch.compile() may warn about duplicate tied
+        # weights in functional_call; the shared embedding/projection weights
+        # are intentional.
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
         self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
         # init all weights

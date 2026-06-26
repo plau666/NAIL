@@ -4,7 +4,7 @@ from typing import Iterable
 
 import torch
 
-from data.synthetic.prompt_bank import PromptBank
+from data.common.prompt_bank import PromptBank
 
 
 def canonical_target_len(prompt_bank: PromptBank) -> int:
@@ -26,10 +26,6 @@ def _ids_to_list(ids: torch.Tensor | Iterable[int]) -> list[int]:
 
 def decode_ids_for_task(ids: torch.Tensor | Iterable[int], *, task: str, p: int) -> str:
     token_ids = _ids_to_list(ids)
-    if task == "s5":
-        from data.s5_cot.task import decode
-
-        return "".join(decode(token_ids))
     if task == "modadd":
         from data.modular_addition.task import decode
 

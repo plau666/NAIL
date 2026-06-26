@@ -7,19 +7,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from data.s5_cot.prompt_bank import PromptBank, build_xy_from_prompt_and_target
-from data.s5_cot.task import CORRUPTIBLE_IDS, LPAREN_ID, RPAREN_ID
-from data.s5_cot.semantic_key_noise import (
-    SEMANTIC_KEY_NOISE_LAW,
-    S5_BLOCK_LEN,
-    S5_NUM_COORDS,
-    S5_VALUE_OFFSET,
-    default_eligible_token_ids,
-    eligible_token_ids_from_values,
-    semantic_key_mask,
-    semantic_key_noise_config_from_obj,
-)
-from data.synthetic.random_suffix_noise import (
+from data.common.prompt_bank import PromptBank, build_xy_from_prompt_and_target
+from data.common.random_suffix_noise import (
     RANDOM_SUFFIX_AFTER_ERROR_LAW,
     compute_poisoned_before,
     effective_trigger_eta,
@@ -397,7 +386,7 @@ def distributional_noisy_teacher_probs(
     clean_logits: torch.Tensor,
     *,
     eta: float,
-    corruptible_token_ids: tuple[int, ...] | list[int] | torch.Tensor = CORRUPTIBLE_IDS,
+    corruptible_token_ids: tuple[int, ...] | list[int] | torch.Tensor,
 ) -> torch.Tensor:
     """Distribution-level counterpart of offline `sample_then_corrupt`.
 
@@ -427,7 +416,7 @@ def corrupted_greedy_teacher_probs(
     clean_logits: torch.Tensor,
     *,
     eta: float,
-    corruptible_token_ids: tuple[int, ...] | list[int] | torch.Tensor = CORRUPTIBLE_IDS,
+    corruptible_token_ids: tuple[int, ...] | list[int] | torch.Tensor,
 ) -> torch.Tensor:
     """Distribution-level counterpart of offline `greedy_then_corrupt`."""
     greedy_actions = torch.argmax(clean_logits, dim=-1)
@@ -449,59 +438,12 @@ def corrupted_greedy_teacher_probs(
     return probs
 
 
-def _normalize_teacher_key_mask(
-    key_mask: torch.Tensor,
-    *,
-    teacher_probs: torch.Tensor,
-) -> torch.Tensor:
-    mask = key_mask.to(device=teacher_probs.device, dtype=torch.bool)
-    expected_shape = teacher_probs.shape[:-1]
-    if tuple(mask.shape) == tuple(expected_shape):
-        return mask
-    if teacher_probs.ndim >= 3 and tuple(mask.shape) == tuple(expected_shape[:-1]):
-        return mask.unsqueeze(-1).expand(expected_shape)
-    if mask.ndim == 0 and len(expected_shape) == 0:
-        return mask
-    raise ValueError(
-        f"semantic_key_noise key_mask shape {tuple(mask.shape)} is incompatible "
-        f"with teacher_probs shape {tuple(teacher_probs.shape)}"
-    )
-
-
-def semantic_key_noise_probs(
-    teacher_probs: torch.Tensor,
-    *,
-    eta: float,
-    key_mask: torch.Tensor,
-    eligible_token_ids: tuple[int, ...] | list[int] = default_eligible_token_ids(),
-) -> torch.Tensor:
-    clean_probs = teacher_probs.float()
-    if eta <= 0:
-        return clean_probs
-
-    key_mask = _normalize_teacher_key_mask(key_mask, teacher_probs=clean_probs)
-    if not torch.any(key_mask):
-        return clean_probs
-
-    eligible_ids = torch.as_tensor(eligible_token_ids, dtype=torch.long, device=clean_probs.device)
-    num_eligible = int(eligible_ids.numel())
-    if num_eligible == 0:
-        raise ValueError("semantic_key_noise requires at least one eligible token id")
-
-    uniform_noise = torch.zeros_like(clean_probs)
-    uniform_noise.index_fill_(dim=-1, index=eligible_ids, value=1.0 / num_eligible)
-    mixed = (1.0 - float(eta)) * clean_probs + float(eta) * uniform_noise
-    return torch.where(key_mask.unsqueeze(-1), mixed, clean_probs)
-
-
 def compute_teacher_token_probs(
     clean_logits: torch.Tensor,
     *,
     eta: float,
     teacher_law: str,
-    corruptible_token_ids: tuple[int, ...] | list[int] | torch.Tensor = CORRUPTIBLE_IDS,
-    key_mask: torch.Tensor | None = None,
-    eligible_token_ids: tuple[int, ...] | list[int] | None = None,
+    corruptible_token_ids: tuple[int, ...] | list[int] | torch.Tensor,
 ) -> torch.Tensor:
     """Return the noisy expert next-token distribution for clean teacher logits.
 
@@ -522,20 +464,6 @@ def compute_teacher_token_probs(
             eta=eta,
             corruptible_token_ids=corruptible_token_ids,
         )
-    if teacher_law == "semantic_key_noise":
-        if key_mask is None:
-            raise ValueError("semantic_key_noise requires key_mask")
-        clean_probs = F.softmax(clean_logits.float(), dim=-1)
-        return semantic_key_noise_probs(
-            clean_probs,
-            eta=eta,
-            key_mask=key_mask,
-            eligible_token_ids=(
-                default_eligible_token_ids()
-                if eligible_token_ids is None
-                else eligible_token_ids
-            ),
-        )
     if teacher_law == RANDOM_SUFFIX_AFTER_ERROR_LAW:
         raise NotImplementedError(
             f"{RANDOM_SUFFIX_AFTER_ERROR_LAW} is stateful; use "
@@ -551,9 +479,7 @@ def compute_teacher_log_probs(
     *,
     eta: float,
     teacher_law: str,
-    corruptible_token_ids: tuple[int, ...] | list[int] | torch.Tensor = CORRUPTIBLE_IDS,
-    key_mask: torch.Tensor | None = None,
-    eligible_token_ids: tuple[int, ...] | list[int] | None = None,
+    corruptible_token_ids: tuple[int, ...] | list[int] | torch.Tensor,
     eps: float = 1e-10,
 ) -> torch.Tensor:
     teacher_probs = compute_teacher_token_probs(
@@ -561,8 +487,6 @@ def compute_teacher_log_probs(
         eta=eta,
         teacher_law=teacher_law,
         corruptible_token_ids=corruptible_token_ids,
-        key_mask=key_mask,
-        eligible_token_ids=eligible_token_ids,
     )
     teacher_action_probs = teacher_probs.gather(2, actions.unsqueeze(-1)).squeeze(-1)
     return torch.log(teacher_action_probs.clamp_min(eps))
@@ -577,57 +501,6 @@ def sample_teacher_actions(teacher_probs: torch.Tensor) -> torch.Tensor:
     return flat_samples.reshape(batch_size, target_len)
 
 
-def _semantic_config_from_random_suffix_config(config) -> object:
-    return semantic_key_noise_config_from_obj(
-        {
-            "enabled": True,
-            "coord_strategy": config.coord_strategy,
-            "fixed_coord": config.fixed_coord,
-            "seed": config.seed,
-            "include_clean_value": True,
-            "eligible_values": config.eligible_values,
-            "apply_to": "partial_perm_image",
-            "one_key_per_block": config.one_key_per_block,
-        }
-    )
-
-
-def _s5_random_suffix_online_masks(
-    prompt: torch.Tensor,
-    *,
-    target_len: int,
-    config,
-    device: str | torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, tuple[int, ...]]:
-    # In S5, only one selected value coordinate per CoT block is the semantic
-    # "fork" token. Parentheses are scaffold tokens and can be forced to remain
-    # syntactically valid after poisoning.
-    torch_device = torch.device(device)
-    semantic_config = _semantic_config_from_random_suffix_config(config)
-    key_mask = semantic_key_mask(prompt, target_len, semantic_config).to(
-        device=torch_device,
-        dtype=torch.bool,
-    )
-    offsets = torch.arange(int(target_len), dtype=torch.long, device=torch_device) % S5_BLOCK_LEN
-    semantic_row = (
-        (offsets >= S5_VALUE_OFFSET)
-        & (offsets < S5_VALUE_OFFSET + S5_NUM_COORDS)
-    )
-    scaffold_row = torch.where(
-        offsets.eq(0),
-        torch.full_like(offsets, LPAREN_ID),
-        torch.full_like(offsets, RPAREN_ID),
-    )
-    semantic_mask = semantic_row.view(1, target_len).expand(prompt.size(0), target_len)
-    scaffold_token_ids = scaffold_row.view(1, target_len).expand(prompt.size(0), target_len)
-    return (
-        key_mask,
-        semantic_mask,
-        scaffold_token_ids,
-        eligible_token_ids_from_values(config.eligible_values),
-    )
-
-
 def _random_suffix_online_masks(
     *,
     task_name: str,
@@ -637,14 +510,6 @@ def _random_suffix_online_masks(
     corruptible_token_ids: tuple[int, ...] | list[int] | torch.Tensor,
     device: str | torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, tuple[int, ...] | list[int]]:
-    target_len = int(actions.size(1))
-    if task_name == "s5":
-        return _s5_random_suffix_online_masks(
-            prompt,
-            target_len=target_len,
-            config=config,
-            device=device,
-        )
     if task_name == "modadd":
         # In modular addition every target token is a running-sum token, so the
         # key mask and semantic mask are both all true. This is the paper's
@@ -653,7 +518,7 @@ def _random_suffix_online_masks(
         return mask, mask, None, tuple(int(token_id) for token_id in corruptible_token_ids)
     raise ValueError(
         f"{RANDOM_SUFFIX_AFTER_ERROR_LAW} online support expects task_name "
-        f"'s5' or 'modadd', got {task_name!r}"
+        f"'modadd', got {task_name!r}"
     )
 
 
@@ -972,11 +837,10 @@ def cached_teacher_token_probs(
     *,
     eta: float,
     teacher_law: str,
-    corruptible_token_ids: tuple[int, ...] | list[int] = CORRUPTIBLE_IDS,
-    semantic_key_noise_config: dict[str, object] | object | None = None,
+    corruptible_token_ids: tuple[int, ...] | list[int],
     clean_target_ids: torch.Tensor | None = None,
     random_suffix_noise_config: dict[str, object] | object | None = None,
-    task_name: str = "s5",
+    task_name: str = "modadd",
     device: str | torch.device,
     autocast_context=nullcontext(),
 ) -> torch.Tensor:
@@ -1004,17 +868,6 @@ def cached_teacher_token_probs(
     )
     input_ids = prompt
     past_key_values = None
-    eligible_token_ids = None
-    semantic_key_masks = None
-    if teacher_law == SEMANTIC_KEY_NOISE_LAW:
-        semantic_config = semantic_key_noise_config_from_obj(
-            semantic_key_noise_config,
-        )
-        eligible_token_ids = eligible_token_ids_from_values(semantic_config.eligible_values)
-        semantic_key_masks = semantic_key_mask(prompt, target_len, semantic_config).to(
-            device=torch_device,
-            dtype=torch.bool,
-        )
     random_suffix_config = None
     random_suffix_key_mask = None
     random_suffix_semantic_mask = None
@@ -1099,16 +952,11 @@ def cached_teacher_token_probs(
                 keep_format_tokens=random_suffix_config.keep_format_tokens,
             ).squeeze(1)
         else:
-            key_mask = None
-            if semantic_key_masks is not None:
-                key_mask = semantic_key_masks[:, step]
             teacher_probs[:, step, :] = compute_teacher_token_probs(
                 logits[:, -1:, :],
                 eta=eta,
                 teacher_law=teacher_law,
                 corruptible_token_ids=corruptible_token_ids_tensor,
-                key_mask=key_mask,
-                eligible_token_ids=eligible_token_ids,
             ).squeeze(1)
         input_ids = actions[:, step:step + 1]
 

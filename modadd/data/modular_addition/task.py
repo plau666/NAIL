@@ -11,11 +11,11 @@ import random
 
 import torch
 
-from data.synthetic.corruption import (
+from data.common.corruption import (
     corrupt_ids as generic_corrupt_ids,
     corrupt_token as generic_corrupt_token,
 )
-from data.synthetic.eval import (
+from data.common.eval import (
     estimate_saved_clean_train_loss as shared_estimate_saved_clean_train_loss,
     evaluate_saved_clean_metrics,
     greedy_generate_target_ids_batched,

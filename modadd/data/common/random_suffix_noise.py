@@ -15,7 +15,7 @@ import torch.nn.functional as F
 RANDOM_SUFFIX_AFTER_ERROR_LAW = "random_suffix_after_error"
 RANDOM_SUFFIX_KEY_POSITION_CHOICES = ("semantic_key",)
 RANDOM_SUFFIX_MODE_CHOICES = ("valid_tokens",)
-RANDOM_SUFFIX_APPLY_TO_CHOICES = ("s5", "modadd", "both")
+RANDOM_SUFFIX_APPLY_TO_CHOICES = ("modadd",)
 RANDOM_SUFFIX_CONFIG_KEYS = (
     "enabled",
     "key_positions",
@@ -37,18 +37,15 @@ class RandomSuffixNoiseConfig:
 
     enabled: bool = True
     # Key tokens are semantic decision points that can trigger the absorbing
-    # poisoned state. For modadd every target token is a key token; for S5 this
-    # is one selected value coordinate per CoT block.
+    # poisoned state. For modadd every target token is a key token.
     key_positions: str = "semantic_key"
     # Optional trigger rate separate from eta, useful for ablations. When null,
     # eta both triggers first errors and controls the unpoisoned key mixture.
     trigger_eta: float | None = None
     random_suffix_mode: str = "valid_tokens"
-    # S5 can keep parentheses syntactically valid after poisoning while making
-    # later value-token feedback uninformative.
     keep_format_tokens: bool = True
     seed: int = 1337
-    apply_to: str = "both"
+    apply_to: str = "modadd"
     coord_strategy: str = "cyclic"
     fixed_coord: int = 0
     eligible_values: tuple[int, ...] = (1, 2, 3, 4, 5)
@@ -136,7 +133,7 @@ def validate_random_suffix_noise_config(config: RandomSuffixNoiseConfig) -> None
     invalid = [int(value) for value in config.eligible_values if int(value) not in range(1, 6)]
     if invalid:
         raise ValueError(
-            "random_suffix_noise.eligible_values are S5 values and must be in "
+            "random_suffix_noise.eligible_values must be in "
             f"1..5, got {invalid}"
         )
 
@@ -146,7 +143,7 @@ def validate_random_suffix_applies_to_task(
     *,
     task_name: str,
 ) -> None:
-    if config.apply_to == "both" or config.apply_to == task_name:
+    if config.apply_to == task_name:
         return
     raise ValueError(
         f"teacher_law={RANDOM_SUFFIX_AFTER_ERROR_LAW!r} was requested for "

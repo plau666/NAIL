@@ -12,8 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.synthetic.prompt_bank import PromptBank, build_xy_from_prompt_and_target
-from data.synthetic.target_spans import canonical_target_len
+from data.common.prompt_bank import PromptBank, build_xy_from_prompt_and_target
+from data.common.target_spans import canonical_target_len
 from nanogpt_checkpoint import load_nanogpt_model
 from torch_dtypes import DTYPE_LOOKUP
 

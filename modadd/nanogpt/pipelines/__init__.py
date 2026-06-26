@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from nanogpt.config_schema import AppConfig
 from nanogpt.pipelines.modadd_data import run_modadd_prompt_bank, run_modadd_render
-from nanogpt.pipelines.s5_data import run_s5_prompt_bank, run_s5_render
 from nanogpt.trainers import run_nail, run_opd, run_pretrain
 from nanogpt.trainers.configs import (
     project_nail_config,
@@ -29,11 +28,5 @@ def run_pipeline(cfg: AppConfig, *, launcher_command: list[str]) -> None:
         return
     if cfg.pipeline.name == "modadd_render":
         run_modadd_render(cfg, launcher_command=launcher_command)
-        return
-    if cfg.pipeline.name == "s5_prompt_bank":
-        run_s5_prompt_bank(cfg, launcher_command=launcher_command)
-        return
-    if cfg.pipeline.name == "s5_render":
-        run_s5_render(cfg, launcher_command=launcher_command)
         return
     raise ValueError(f"unsupported pipeline {cfg.pipeline.name!r}")

@@ -67,18 +67,6 @@ class SweepConfig:
 
 
 @dataclass
-class SemanticKeyNoiseConfig:
-    enabled: bool = True
-    coord_strategy: str = "cyclic"
-    fixed_coord: int = 0
-    seed: int = 1337
-    include_clean_value: bool = True
-    eligible_values: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
-    apply_to: str = "partial_perm_image"
-    one_key_per_block: bool = True
-
-
-@dataclass
 class RandomSuffixNoiseConfig:
     enabled: bool = True
     key_positions: str = "semantic_key"
@@ -86,7 +74,7 @@ class RandomSuffixNoiseConfig:
     random_suffix_mode: str = "valid_tokens"
     keep_format_tokens: bool = True
     seed: int = 1337
-    apply_to: str = "both"
+    apply_to: str = "modadd"
     coord_strategy: str = "cyclic"
     fixed_coord: int = 0
     eligible_values: list[int] = field(default_factory=lambda: [1, 2, 3, 4, 5])
@@ -95,7 +83,7 @@ class RandomSuffixNoiseConfig:
 
 @dataclass
 class TaskConfig:
-    """Hydra task surface shared by the synthetic experiments.
+    """Hydra task surface for modular-addition experiments.
 
     Paper-to-code map:
     - `eta` is the paper noise level.
@@ -105,15 +93,13 @@ class TaskConfig:
       paper method preset; the online implementation backend is student_prefix.
     """
 
-    dataset: str = "s5_cot"
+    dataset: str = "modadd_cot"
     dataset_prefix: str = ""
     run_prefix: str = ""
     out_prefix: str = ""
     data_root: str = "data"
     teacher_output_root: str = "."
-    task: str = "s5"
-    s5_mode: str = "cot"
-    s5_m: int = 21
+    task: str = "modadd"
     modadd_p: int = 7
     modadd_m: int = 21
     bank_seed: int = 1337
@@ -130,8 +116,7 @@ class TaskConfig:
     # to render fixed LogLossBC datasets.
     teacher_checkpoint: str = ""
     prompt_bank_dir: str = ""
-    # Noisy teacher law pi_eta: distributional, semantic-key, or absorbing
-    # random-suffix feedback. Offline render jobs store the same law in
+    # Noisy teacher law pi_eta. Offline render jobs store the same law in
     # `meta.json` so LogLossBC runs can be matched to student-prefix runs.
     teacher_law: str = "distributional_noise"
     # `teacher_signal=mc` samples teacher tokens; `full` uses the full
@@ -159,7 +144,6 @@ class TaskConfig:
     # Offline rendering controls for fixed LogLossBC datasets.
     rollout_mode: str = "greedy_then_corrupt"
     target_mode: str = "tokens"
-    semantic_key_noise: SemanticKeyNoiseConfig = field(default_factory=SemanticKeyNoiseConfig)
     random_suffix_noise: RandomSuffixNoiseConfig = field(default_factory=RandomSuffixNoiseConfig)
 
 
@@ -208,16 +192,10 @@ class OptimConfig:
     offline_train_subset_size: int = 0
     offline_train_shuffle: bool = False
     offline_target_type: str = "tokens"
-    offline_eval_diagnostics: bool = False
-    offline_eval_diagnostics_loss_threshold: float = 1.0
     final_eval_on_exit: bool = False
-    s5_eval_metrics: bool = False
-    s5_eval_clean_train_loss: bool = False
     modadd_eval_metrics: bool = False
     modadd_eval_clean_train_loss: bool = False
-    s5_eval_n: int = 256
-    s5_eval_batch_size: int = 256
-    s5_eval_seed: int = 123
+    eval_seed: int = 123
 
 
 @dataclass
@@ -253,8 +231,6 @@ def materialize_config(raw_cfg: DictConfig) -> AppConfig:
         "student_prefix",
         "modadd_prompt_bank",
         "modadd_render",
-        "s5_prompt_bank",
-        "s5_render",
     }:
         raise ValueError(f"unsupported pipeline {cfg.pipeline.name!r}")
     if cfg.pipeline.name == "pretrain" and not cfg.task.dataset:
@@ -282,18 +258,4 @@ def materialize_config(raw_cfg: DictConfig) -> AppConfig:
             raise ValueError("modadd_render experiments require task.dataset")
         if cfg.task.subset_size <= 0:
             raise ValueError("modadd_render experiments require task.subset_size > 0")
-    if cfg.pipeline.name == "s5_prompt_bank":
-        if not cfg.task.prompt_bank_dir:
-            raise ValueError("s5_prompt_bank experiments require task.prompt_bank_dir")
-        if cfg.task.n_train <= 0 or cfg.task.n_val <= 0:
-            raise ValueError("s5_prompt_bank experiments require task.n_train > 0 and task.n_val > 0")
-    if cfg.pipeline.name == "s5_render":
-        if not cfg.task.teacher_checkpoint:
-            raise ValueError("s5_render experiments require task.teacher_checkpoint")
-        if not cfg.task.prompt_bank_dir:
-            raise ValueError("s5_render experiments require task.prompt_bank_dir")
-        if not cfg.task.dataset:
-            raise ValueError("s5_render experiments require task.dataset")
-        if cfg.task.subset_size <= 0:
-            raise ValueError("s5_render experiments require task.subset_size > 0")
     return cfg

@@ -11,7 +11,7 @@ from data.modular_addition.prompt_bank import (
     select_train_subset,
 )
 from data.modular_addition.task import corrupt_ids, corruptible_token_ids
-from data.synthetic.random_suffix_noise import (
+from data.common.random_suffix_noise import (
     RANDOM_SUFFIX_AFTER_ERROR_LAW,
     RandomSuffixStepSpec,
     generate_random_suffix_after_error_targets,
@@ -20,7 +20,7 @@ from data.synthetic.random_suffix_noise import (
     random_suffix_noise_meta,
     validate_random_suffix_applies_to_task,
 )
-from data.synthetic.offline_render import (
+from data.common.offline_render import (
     ROLLOUT_MODE_CHOICES,
     build_dataset_meta as shared_build_dataset_meta,
     build_oracle_val_split,

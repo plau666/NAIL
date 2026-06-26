@@ -1,118 +1,124 @@
-# NAIL — synthetic experiments (modular addition)
+# Modular-Addition Experiments
 
-The synthetic-experiment side of NAIL. Implements **NAIL-F**, **NAIL-R**,
-**OPD-F**, **OPD-R**, **NAIL-Mixed**, and the offline **LogLossBC** baseline
-on the modular-addition task with a small transformer student trained from
-scratch.
+Modular-addition experiments for LogLossBC, NAIL-F, NAIL-R, NAIL-Mixed, OPD-F,
+and OPD-R. The student is a small transformer trained from scratch with Hydra
+configs.
 
-The `gsm/` directory implements the same methods for LoRA-finetuned
-LLMs on GSM8K. The math and surrogates match between the two; the synth side
-trains from scratch with a Hydra-driven launcher, and the real side uses
-argparse + bash wrappers.
+## Quick Start
 
-## Layout
-
-```
-modadd/
-├── README.md
-├── nanogpt/                  # core package — methods, trainers, pipelines
-│   ├── methods/student_prefix.py     # NAIL-F/R + OPD-F/R + Mixed loss code
-│   ├── trainers/native_student_prefix.py   # the main on-policy training loop
-│   ├── trainers/{nail,opd,pretrain}.py     # method-family entrypoints
-│   ├── trainers/{configs,runtime,wandb}.py # config schemas, RNG, logging
-│   ├── pipelines/modadd_data.py            # modular-addition data pipeline
-│   ├── workers/                            # pretraining workers
-│   ├── utils/                              # repo / hydra resolvers
-│   └── run.py                              # `@hydra.main` Hydra entry point
-├── hydra_configs/            # config tree (config.yaml + experiment/, task/, …)
-├── data/
-│   ├── modular_addition/     # task definition + prompt-bank generators
-│   ├── synthetic/            # shared infrastructure (corruption, eval, …)
-│   └── s5_cot/               # kept only as an import dependency of student_prefix.py
-│                             # (CORRUPTIBLE_IDS + semantic-key noise constants).
-├── model.py                  # tiny transformer (nanoGPT-style)
-├── nanogpt_checkpoint.py     # checkpoint I/O
-└── torch_dtypes.py
-```
-
-## Install
-
-Install everything from the top-level repo via `uv` per
-[`../README.md`](../README.md#quick-start). The locked environment includes
-`hydra-core`, `hydra-submitit-launcher`, and `omegaconf`, so nothing additional
-is needed for `modadd/`.
-
-## Running a modular-addition experiment
-
-All commands assume `cd NAIL/modadd`. Hydra finds `nanogpt/` and the
-`data.*` / `model` / `nanogpt_checkpoint` top-level helpers automatically
-because Python uses the cwd in `sys.path`.
-
-### Pretrain the teacher (modadd CoT)
+1. Set up the environment from the repo root.
 
 ```bash
-python -m nanogpt.run experiment=modadd_cot
+uv sync --locked
+source .venv/bin/activate
+cd modadd
 ```
 
-### Train a NAIL-F or NAIL-R student from the saved teacher
+2. Prepare the clean prompt bank.
 
 ```bash
-# NAIL training (forward / reverse / mixed via experiment overrides)
-python -m nanogpt.run experiment=modadd_nail
-
-# OPD baselines
-python -m nanogpt.run experiment=modadd_opd
-python -m nanogpt.run experiment=modadd_opd_forward
-
-# Offline noisy-BC baseline
-python -m nanogpt.run experiment=modadd_noisy_bc
+bash scripts/train.sh experiment=modadd_prompt_bank
 ```
+
+3. Pretrain the clean CoT teacher.
+
+```bash
+bash scripts/train.sh experiment=modadd_cot
+```
+
+4. Run one method. See [Training](#training).
+
+```bash
+bash scripts/train.sh experiment=<experiment>
+```
+
+If you want to run LogLossBC, render noisy teacher rollouts first; see
+[OfflineBC](#offlinebc). The online methods do not need this step.
+
+## Training
+
+All methods use the same launcher:
+
+```bash
+bash scripts/train.sh experiment=<experiment> KEY=VALUE ...
+```
+
+Available experiments:
+
+| Method | Experiment |
+|---|---|
+| LogLossBC | `modadd_noisy_bc` |
+| NAIL-F | `modadd_nail` |
+| NAIL-R | `modadd_nail_reverse_mc_fixed` |
+| NAIL-Mixed | `modadd_nail` with `task.loss=mixed task.kl_beta=<beta>` |
+| OPD-F | `modadd_opd_forward` |
+| OPD-R | `modadd_opd` |
 
 Common overrides:
 
 ```bash
-# Run on GPU 1, seed 43, change eta (noise level) for the teacher
-python -m nanogpt.run experiment=modadd_nail \
-    runtime.device=cuda:1 runtime.seed=43 task.eta=0.1
-
-# Switch the reverse-KL beta in the mixed objective
-python -m nanogpt.run experiment=modadd_nail \
-    task.loss=mixed task.kl_beta=0.3
+bash scripts/train.sh experiment=modadd_nail task.eta=0.1 optim.seed=43
+bash scripts/train.sh experiment=modadd_nail task.loss=mixed task.kl_beta=0.25
+bash scripts/train.sh experiment=modadd_opd runtime.device=cuda:1 optim.batch_size=64
+bash scripts/train.sh experiment=modadd_noisy_bc run.name=bc_eta005_seed44 optim.seed=44
 ```
 
-See `hydra_configs/experiment/modadd_*.yaml` for the full list of preset
-configs. The list:
+Useful override keys include `runtime=cpu`, `runtime.device`, `logging`,
+`run.name`, `run.out_dir`, `task.eta`, `task.subset_size`, `task.loss`,
+`task.kl_beta`, `optim.seed`, `optim.batch_size`, `optim.max_iters`, and
+`optim.learning_rate`.
 
+Checkpoints and run metadata are written to `run.out_dir`. By default, public
+configs write prompt banks and rendered datasets under `data/`, and teacher,
+online, and OfflineBC runs under `reruns/`. Set `run.out_dir=<path>` when you
+want a simple explicit output path.
+
+## OfflineBC
+
+LogLossBC trains on a fixed noisy-teacher rollout dataset. Render it first:
+
+```bash
+bash scripts/train.sh experiment=modadd_noisy_render task.eta=0.05 task.subset_size=1000000
 ```
-modadd_base.yaml                # base modadd student pretraining
-modadd_base_p7_m30.yaml         # base with p=7, m=30
-modadd_cot.yaml                 # CoT teacher pretrain
-modadd_cot_p7_m21.yaml          # p=7, m=21 CoT variant
-modadd_cot_p7_m31.yaml          # p=7, m=31 CoT variant
-modadd_nail.yaml                # NAIL-F (default)
-modadd_nail_reverse_full.yaml   # NAIL-R, full-distribution variant
-modadd_nail_reverse_mc_fixed.yaml   # NAIL-R, MC, fixed eta
-modadd_noisy_bc.yaml            # offline LogLossBC on noisy teacher rollouts
-modadd_noisy_render.yaml        # generate noisy-teacher rollout dataset
-modadd_opd.yaml                 # OPD-R (default reverse on-policy distillation)
-modadd_opd_forward.yaml         # OPD-F
-modadd_prompt_bank.yaml         # build the clean modadd prompt bank
+
+Then train:
+
+```bash
+bash scripts/train.sh experiment=modadd_noisy_bc task.eta=0.05 task.subset_size=1000000
 ```
 
-## Method ↔ knob map
+Use the same `task.eta`, `task.subset_size`, `task.modadd_p`, `task.modadd_m`,
+and seed settings for rendering and training so the dataset name resolves to the
+same directory.
 
-The paper-facing names map onto a few canonical config fields. See
-`nanogpt/methods/student_prefix.py:90-114` (`resolved_paper_method_name`) for
-the resolver, but the short version:
+## Method Map
 
-| Method      | `task.method_family` | `task.loss` | `task.teacher_signal` | `task.rollout_temperature_override` |
-|-------------|----------------------|-------------|------------------------|-------------------------------------|
-| NAIL-F      | nail                 | forward     | mc                     | 0.0 (default)                       |
-| NAIL-R      | nail                 | reverse     | mc                     | 0.0                                 |
-| NAIL-Mixed  | nail                 | mixed       | mc                     | 0.0 (set `task.kl_beta`)            |
-| OPD-F       | opd                  | forward     | mc                     | 1.0                                 |
-| OPD-R       | opd                  | reverse     | mc                     | 1.0                                 |
-| LogLossBC   | offline baseline     | n/a         | n/a                    | n/a                                 |
+The paper-facing methods are presets over a shared student-prefix backend:
 
-Hydra `experiment=modadd_*` presets already wire these correctly — the table
-is just for direct field overrides.
+| Method | Prefix policy | Loss | Main knobs |
+|---|---|---|---|
+| NAIL-F | greedy student | forward KL MC | `task.loss=forward`, rollout temp `0` |
+| NAIL-R | greedy student | reverse KL MC | `task.loss=reverse`, rollout temp `0` |
+| NAIL-Mixed | greedy student | mixed KL | `task.loss=mixed`, `task.kl_beta=<beta>` |
+| OPD-F | sampled student | forward KL MC | `task.rollout_temperature_override=1.0` |
+| OPD-R | sampled student | reverse KL MC | `experiment=modadd_opd` |
+| LogLossBC | fixed teacher rollouts | token log loss | `experiment=modadd_noisy_bc` |
+
+## Layout
+
+```text
+modadd/
+  data/modular_addition/       # task and prompt-bank utilities
+  data/common/                  # shared prompt-bank, render, eval, and loss helpers
+  hydra_configs/               # public method, task, runtime, and sweep configs
+  nanogpt/                     # training package and Hydra entry point
+  scripts/train.sh             # thin launcher around python -m nanogpt.run
+  model.py                     # small nanoGPT-style transformer
+  nanogpt_checkpoint.py        # checkpoint I/O
+```
+
+## Notes
+
+- W&B logging is enabled in GPU experiment presets. Use `logging=disabled` for
+  local dry runs.
+- Hydra writes launcher logs under `hydra_outputs/` or `hydra_multirun/`.

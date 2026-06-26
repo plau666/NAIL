@@ -3,7 +3,7 @@ defaults:
   - /pipeline: pretrain
   - /task: modadd_noisy_offline
   - /model: modadd_depth1
-  - /optim: synthetic_offline_bc
+  - /optim: offline_bc
   - /runtime: gpu_float16
   - /logging: enabled
   - /cluster: local

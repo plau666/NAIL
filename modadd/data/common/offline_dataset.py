@@ -3,7 +3,7 @@ import json
 
 import torch
 
-from data.synthetic.target_spans import (
+from data.common.target_spans import (
     print_target_span_diagnostic,
     target_ids_from_y_row,
 )
@@ -123,7 +123,7 @@ def print_offline_target_span_diagnostic(data_dir, *, method_name, target_type="
 
     print_target_span_diagnostic(
         method_name=method_name,
-        task=str(meta.get("task", "s5")),
+        task=str(meta.get("task", "modadd")),
         p=int(meta.get("p", 5)),
         prompt_len=int(meta["prompt_len"]),
         cot_len=_target_len_from_meta(meta),

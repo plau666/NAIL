@@ -14,19 +14,13 @@ from data.modular_addition.task import (
     corruptible_token_ids as modadd_corruptible_token_ids,
     evaluate_saved_clean_modadd_metrics,
 )
-from data.s5_cot.task import CORRUPTIBLE_IDS as S5_CORRUPTIBLE_IDS
-from data.s5_cot.task import evaluate_saved_clean_s5_metrics
-from data.s5_cot.semantic_key_noise import (
-    SEMANTIC_KEY_NOISE_LAW,
-    semantic_key_noise_config_from_obj,
-)
-from data.synthetic.random_suffix_noise import (
+from data.common.random_suffix_noise import (
     RANDOM_SUFFIX_AFTER_ERROR_LAW,
     random_suffix_noise_config_from_obj,
     validate_random_suffix_applies_to_task,
 )
-from data.synthetic.prompt_bank import load_prompt_bank, select_train_subset
-from data.synthetic.target_spans import (
+from data.common.prompt_bank import load_prompt_bank, select_train_subset
+from data.common.target_spans import (
     canonical_target_len,
     print_prompt_bank_target_span_diagnostic,
 )
@@ -89,14 +83,12 @@ def validate_config(cfg: StudentPrefixConfig) -> None:
     loss_temperature_override = getattr(cfg, "loss_temperature_override", None)
     kl_beta = getattr(cfg, "kl_beta", None)
     teacher_law = getattr(cfg, "teacher_law", "distributional_noise")
-    task_name = getattr(cfg, "task", "s5")
+    task_name = getattr(cfg, "task", "modadd")
 
+    if task_name != "modadd":
+        raise ValueError(f"student-prefix training only supports task='modadd', got {task_name!r}")
     if method_family not in {"opd", "nail"}:
         raise ValueError(f"unknown method_family {method_family!r}")
-    if teacher_law == SEMANTIC_KEY_NOISE_LAW:
-        if task_name != "s5":
-            raise ValueError("semantic_key_noise teacher_law is only supported for S5")
-        semantic_key_noise_config_from_obj(getattr(cfg, "semantic_key_noise", None))
     if teacher_law == RANDOM_SUFFIX_AFTER_ERROR_LAW:
         random_suffix_config = random_suffix_noise_config_from_obj(
             getattr(cfg, "random_suffix_noise", None)
@@ -170,8 +162,6 @@ def build_teacher_prob_kwargs(
     clean_target_ids: torch.Tensor,
 ) -> dict[str, object]:
     kwargs: dict[str, object] = {}
-    if cfg.teacher_law == SEMANTIC_KEY_NOISE_LAW:
-        kwargs["semantic_key_noise_config"] = cfg.semantic_key_noise
     if cfg.teacher_law == RANDOM_SUFFIX_AFTER_ERROR_LAW:
         kwargs["clean_target_ids"] = clean_target_ids
         kwargs["random_suffix_noise_config"] = cfg.random_suffix_noise
@@ -290,25 +280,20 @@ def canonical_student_prefix_metadata(
     *,
     default_method_family: str | None = None,
 ) -> dict[str, object]:
-    task_name = metadata.get("task", "s5")
+    task_name = metadata.get("task", "modadd")
     method_state = normalize_student_prefix_method(
         metadata,
         default_method_family=default_method_family,
     )
     canonical = {
         "task": task_name,
-        "p": metadata.get("p", 5 if task_name == "s5" else None),
+        "p": metadata.get("p"),
         "m": metadata.get("m"),
         "teacher_checkpoint": metadata.get("teacher_checkpoint"),
         "prompt_bank_dir": metadata.get("prompt_bank_dir"),
         "subset_size": metadata.get("subset_size"),
         "eta": metadata.get("eta"),
         "teacher_law": metadata.get("teacher_law"),
-        "semantic_key_noise": (
-            metadata.get("semantic_key_noise")
-            if metadata.get("teacher_law") == SEMANTIC_KEY_NOISE_LAW
-            else None
-        ),
         "random_suffix_noise": (
             metadata.get("random_suffix_noise")
             if metadata.get("teacher_law") == RANDOM_SUFFIX_AFTER_ERROR_LAW
@@ -329,8 +314,6 @@ def canonical_student_prefix_metadata(
         "continue_from_subset_size": metadata.get("continue_from_subset_size", 0),
         "seed": metadata.get("seed"),
     }
-    if canonical["m"] is None and task_name == "s5":
-        canonical["m"] = metadata.get("m")
     return canonical
 
 
@@ -512,8 +495,6 @@ def validate_warm_start_checkpoint(
 
 
 def resolve_task_helpers(task_name: str, *, p: int):
-    if task_name == "s5":
-        return tuple(S5_CORRUPTIBLE_IDS), evaluate_saved_clean_s5_metrics
     if task_name == "modadd":
         return tuple(modadd_corruptible_token_ids(p)), evaluate_saved_clean_modadd_metrics
     raise ValueError(f"unknown task {task_name!r}")
@@ -709,10 +690,6 @@ def build_run_metadata(
         "dtype": str(torch_dtype).replace("torch.", ""),
         "compile": bool(cfg.compile),
     }
-    if cfg.teacher_law == SEMANTIC_KEY_NOISE_LAW:
-        metadata["semantic_key_noise"] = semantic_key_noise_config_from_obj(
-            cfg.semantic_key_noise
-        ).to_dict()
     if cfg.teacher_law == RANDOM_SUFFIX_AFTER_ERROR_LAW:
         metadata["random_suffix_noise"] = random_suffix_noise_config_from_obj(
             cfg.random_suffix_noise

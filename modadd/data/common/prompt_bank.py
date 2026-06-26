@@ -25,17 +25,13 @@ def _normalize_meta(
     normalized = dict(meta)
     prompt_len = int(clean_train_prompt_ids.size(1))
     cot_len = int(clean_train_cot_ids.size(1))
-    task = str(normalized.get("task", "s5"))
+    task = str(normalized.get("task", "modadd"))
     normalized["task"] = task
     normalized.setdefault("prompt_len", prompt_len)
     normalized.setdefault("cot_len", cot_len)
     normalized.setdefault("target_len", cot_len)
 
-    if task == "s5":
-        normalized.setdefault("p", 5)
-        normalized.setdefault("m", (prompt_len - 1) // 7)
-        normalized.setdefault("final_answer_len", 7)
-    elif task == "modadd":
+    if task == "modadd":
         normalized.setdefault("p", int(clean_train_prompt_ids.max().item()))
         normalized.setdefault("m", cot_len)
         normalized.setdefault("final_answer_len", 1)
