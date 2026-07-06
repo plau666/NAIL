@@ -1,4 +1,4 @@
-# NAIL — Noise-Aware Imitation Learning
+# NAIL: Noise-robust Aggregation for Imitation Learning
 
 The repo has two experiment stacks:
 
